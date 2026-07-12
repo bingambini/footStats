@@ -1,8 +1,13 @@
 import os
-from fastapi import FastAPI, HTTPException
+import logging
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from typing import List, Optional
 from supabase import create_client, Client
+
+# ჩავრთოთ ლოგერი, რომ ვერსელის კონსოლში ყველაფერი დავინახოთ
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("football-pipeline")
 
 app = FastAPI()
 
@@ -19,10 +24,22 @@ class PlayerInput(BaseModel):
     height_cm: Optional[int] = None
     weight_kg: Optional[int] = None
 
+@app.get("/")
+@app.get("/api")
+@app.get("/api/status")
+def get_status(request: Request):
+    logger.info(f" 🚀 რექვესტი შემოვიდა მისამართზე: {request.url.path}")
+    return {
+        "status": "online",
+        "engine": "Python + FastAPI (Forced Build)",
+        "supabase_connected": supabase is not None,
+        "resolved_path": request.url.path
+    }
+
 @app.post("/api/import_players")
 def import_players(players: List[PlayerInput]):
     if not supabase:
-        raise HTTPException(status_code=500, detail="Supabase კავშირი არ არის აქტიური.")
+        raise HTTPException(status_code=500, detail="Supabase არ არის დაკავშირებული.")
         
     inserted_count = 0
     errors = []
