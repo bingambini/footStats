@@ -33,13 +33,27 @@ class TeamScout:
             "Cache-Control": "max-age=0"
         }
     
+    def normalize_url(self, url: str) -> str:
+        """ნორმალიზაცია URL-ს - მოაშორებს /players/ თუ არის"""
+        # მოვაშოროთ /players/ ბოლოდან
+        if url.endswith('/players/'):
+            url = url[:-len('/players/')]
+        elif url.endswith('/players'):
+            url = url[:-len('/players')]
+        
+        # დავრწმუნდეთ რომ ბოლოში / არის
+        if not url.endswith('/'):
+            url += '/'
+        
+        return url
+    
     async def fetch_page(self, url: str) -> Optional[str]:
         """გადმოწერს HTML გვერდს გაუმჯობესებული headers-ით"""
         try:
             async with httpx.AsyncClient(
                 follow_redirects=True,
                 timeout=30.0,
-                verify=False  # SSL verification-ს ვთიშავთ
+                verify=False
             ) as client:
                 response = await client.get(url, headers=self.headers)
                 response.raise_for_status()
@@ -65,73 +79,112 @@ class TeamScout:
             "logo_url": ""
         }
         
-        # გუნდის სახელი - h1 ან title
-        title = soup.find('h1')
-        if title:
-            team_data["name"] = title.get_text(strip=True)
+        # გუნდის სახელი - ვეძებთ h1-ს რომელიც შეიცავს გუნდის სახელს
+        h1_tags = soup.find_all('h1')
+        for h1 in h1_tags:
+            text = h1.get_text(strip=True)
+            # ვეძებთ გუნდის სახელს რომელიც არ არის title
+            if 'состав' not in text.lower() and 'состав команды' not in text.lower():
+                # ვცადოთ ამოვიღოთ გუნდის სახელი
+                if '(' in text and ')' in text:
+                    # ფორმატი: "გუნდი (ქალაქი, ქვეყანა)"
+                    match = re.match(r'^([^(]+)\s*\(([^)]+)\)', text)
+                    if match:
+                        team_data["name"] = match.group(1).strip()
+                        location = match.group(2).strip()
+                        if ',' in location:
+                            parts = location.split(',')
+                            team_data["city"] = parts[0].strip()
+                            team_data["country"] = parts[1].strip()
+                        else:
+                            team_data["city"] = location
+                        break
+                else:
+                    team_data["name"] = text
+                    break
+        
+        # თუ ვერ ვიპოვეთ h1-ში, ვცადოთ meta tags
+        if not team_data["name"]:
+            meta_title = soup.find('meta', property='og:title')
+            if meta_title:
+                title = meta_title.get('content', '')
+                if '(' in title and ')' in title:
+                    match = re.match(r'^([^(]+)\s*\(([^)]+)\)', title)
+                    if match:
+                        team_data["name"] = match.group(1).strip()
+                        location = match.group(2).strip()
+                        if ',' in location:
+                            parts = location.split(',')
+                            team_data["city"] = parts[0].strip()
+                            team_data["country"] = parts[1].strip()
+        
+        # ლოგო - ვეძებთ og:image meta tag
+        og_image = soup.find('meta', property='og:image')
+        if og_image:
+            team_data["logo_url"] = og_image.get('content', '')
         else:
-            # fallback - title tag
-            title_tag = soup.find('title')
-            if title_tag:
-                team_data["name"] = title_tag.get_text(strip=True).split(' - ')[0]
+            # fallback - ვეძებთ img თაგს
+            logo_candidates = soup.find_all('img')
+            for img in logo_candidates:
+                src = img.get('src', '')
+                alt = img.get('alt', '').lower()
+                
+                if any(keyword in alt for keyword in ['лого', 'logo', 'эмблема']):
+                    if src.startswith('http'):
+                        team_data["logo_url"] = src
+                        break
+                elif any(keyword in src.lower() for keyword in ['logo', 'crest', 'badge', 'emblem']):
+                    if src.startswith('http'):
+                        team_data["logo_url"] = src
+                        break
         
-        # ლოგო - ვეძებთ img თაგს
-        logo_candidates = soup.find_all('img')
-        for img in logo_candidates:
-            src = img.get('src', '')
-            alt = img.get('alt', '').lower()
-            
-            # ვეძებთ ლოგოს URL-ში ან alt text-ში
-            if any(keyword in alt for keyword in ['лого', 'logo', 'эмблема', 'crest', 'badge']):
-                if src.startswith('http'):
-                    team_data["logo_url"] = src
-                    break
-            elif any(keyword in src.lower() for keyword in ['logo', 'crest', 'badge', 'emblem']):
-                if src.startswith('http'):
-                    team_data["logo_url"] = src
-                    break
+        # ვეძებთ გუნდის დეტალებს - სპეციფიკური კლასებით
+        # ჩვეულებრივ championat.com-ზე არის dl ან table ელემენტები
+        info_elements = soup.find_all(['dl', 'table', 'div'], class_=re.compile(r'team-info|info|details', re.I))
         
-        # ვეძებთ გუნდის დეტალებს
-        info_blocks = soup.find_all(['div', 'dl', 'ul'], class_=re.compile(r'info|detail|team|about', re.I))
-        
-        for block in info_blocks:
-            text = block.get_text()
+        for element in info_elements:
+            text = element.get_text()
             
             # სტადიონი
-            if 'стадион' in text.lower() or 'stadium' in text.lower():
-                match = re.search(r'[:\-]\s*([A-Za-zА-Яа-яЁё\s\-\(\)]+)', text)
-                if match:
-                    team_data["stadium"] = match.group(1).strip()
+            stadium_match = re.search(r'(?:стадион|stadium)[:\s]+([^\n\r]+)', text, re.I)
+            if stadium_match:
+                team_data["stadium"] = stadium_match.group(1).strip()
             
             # ქალაქი
-            if 'город' in text.lower() or 'city' in text.lower():
-                match = re.search(r'[:\-]\s*([A-Za-zА-Яа-яЁё\s\-]+)', text)
-                if match:
-                    team_data["city"] = match.group(1).strip()
+            city_match = re.search(r'(?:город|city)[:\s]+([^\n\r]+)', text, re.I)
+            if city_match:
+                team_data["city"] = city_match.group(1).strip()
             
             # ქვეყანა
-            if 'страна' in text.lower() or 'country' in text.lower():
-                match = re.search(r'[:\-]\s*([A-Za-zА-Яа-яЁё\s\-]+)', text)
-                if match:
-                    team_data["country"] = match.group(1).strip()
+            country_match = re.search(r'(?:страна|country)[:\s]+([^\n\r]+)', text, re.I)
+            if country_match:
+                team_data["country"] = country_match.group(1).strip()
             
             # მწვრთნელი
-            if 'тренер' in text.lower() or 'coach' in text.lower() or 'главный тренер' in text.lower():
-                match = re.search(r'[:\-]\s*([A-Za-zА-Яа-яЁё\s\-]+)', text)
-                if match:
-                    team_data["coach"] = match.group(1).strip()
+            coach_match = re.search(r'(?:тренер|coach|главный тренер)[:\s]+([^\n\r]+)', text, re.I)
+            if coach_match:
+                team_data["coach"] = coach_match.group(1).strip()
         
         # Short code - პირველი 3 ასო სახელიდან
         if team_data["name"]:
-            words = team_data["name"].split()
-            if words:
-                team_data["short_code"] = words[0][:3].upper()
+            # ვცადოთ ინგლისური ასოები
+            english_name = re.sub(r'[^a-zA-Z\s]', '', team_data["name"])
+            if english_name:
+                words = english_name.split()
+                if words:
+                    team_data["short_code"] = words[0][:3].upper()
+            else:
+                # თუ არა ინგლისური, ვიღებთ პირველ 3 ასოს
+                team_data["short_code"] = team_data["name"][:3].upper()
         
         return team_data
     
     async def scout_team(self, url: str) -> Dict:
         """მთავარი ფუნქცია - აგროვებს გუნდის ინფორმაციას"""
-        html = await self.fetch_page(url)
+        # ნორმალიზაცია URL
+        normalized_url = self.normalize_url(url)
+        
+        html = await self.fetch_page(normalized_url)
         
         if not html:
             return {
@@ -140,12 +193,13 @@ class TeamScout:
                 "data": None
             }
         
-        team_info = self.parse_team_info(html, url)
+        team_info = self.parse_team_info(html, normalized_url)
         
         return {
             "success": True,
             "data": team_info,
-            "raw_html_length": len(html)
+            "raw_html_length": len(html),
+            "normalized_url": normalized_url
         }
 
 # ============================================
