@@ -1,3 +1,6 @@
 supabase
 fastapi
 pydantic
+httpx
+beautifulsoup4
+lxml
