@@ -30,20 +30,28 @@ class TeamScout:
             "Sec-Fetch-Dest": "document",
             "Sec-Fetch-Mode": "navigate",
             "Sec-Fetch-Site": "none",
-            "Cache-Control": "max-age=0"
+            "Sec-Fetch-User": "?1",
+            "Cache-Control": "max-age=0",
+            "DNT": "1",
+            "Pragma": "no-cache",
+            "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"macOS"'
+        }
+        self.cookies = {
+            "_ga": "GA1.2.1234567890.1234567890",
+            "_gid": "GA1.2.0987654321.0987654321"
         }
     
     def normalize_url(self, url: str) -> str:
         """ნორმალიზაცია URL-ს - მოაშორებს /players/ თუ არის"""
         print(f"[DEBUG] normalize_url - ორიგინალი: {url}")
         
-        # მოვაშოროთ /players/ ბოლოდან
         if url.endswith('/players/'):
             url = url[:-len('/players/')]
         elif url.endswith('/players'):
             url = url[:-len('/players')]
         
-        # დავრწმუნდეთ რომ ბოლოში / არის
         if not url.endswith('/'):
             url += '/'
         
@@ -55,20 +63,38 @@ class TeamScout:
         try:
             print(f"[DEBUG] ვცდილობ გადმოწერას: {url}")
             
-            async with httpx.AsyncClient(
-                follow_redirects=True,
-                timeout=30.0,
-                verify=False
-            ) as client:
-                response = await client.get(url, headers=self.headers)
-                print(f"[DEBUG] Response status: {response.status_code}")
-                print(f"[DEBUG] Response headers: {dict(response.headers)}")
-                response.raise_for_status()
-                print(f"[DEBUG] HTML სიგრძე: {len(response.text)} bytes")
-                return response.text
+            for attempt in range(3):
+                print(f"[DEBUG] მცდელობა {attempt + 1}/3")
+                
+                async with httpx.AsyncClient(
+                    follow_redirects=True,
+                    timeout=30.0,
+                    verify=False
+                ) as client:
+                    response = await client.get(
+                        url, 
+                        headers=self.headers,
+                        cookies=self.cookies
+                    )
+                    print(f"[DEBUG] Response status: {response.status_code}")
+                    
+                    if response.status_code == 200:
+                        print(f"[DEBUG] HTML სიგრძე: {len(response.text)} bytes")
+                        return response.text
+                    elif response.status_code == 403:
+                        print(f"[ERROR] 403 Forbidden - საიტი ბლოკავს requests-ს")
+                        if attempt < 2:
+                            print(f"[DEBUG] ვცდილობ თავიდან...")
+                            await asyncio.sleep(2)
+                            continue
+                    else:
+                        print(f"[ERROR] HTTP შეცდომა: {response.status_code}")
+                        response.raise_for_status()
+            
+            return None
+            
         except httpx.HTTPStatusError as e:
             print(f"[ERROR] HTTP შეცდომა: {e.response.status_code}")
-            print(f"[ERROR] Response text: {e.response.text[:500]}")
             return None
         except httpx.RequestError as e:
             print(f"[ERROR] Request შეცდომა: {type(e).__name__} - {str(e)}")
@@ -94,7 +120,6 @@ class TeamScout:
             "logo_url": ""
         }
         
-        # გუნდის სახელი - ვეძებთ h1-ს რომელიც შეიცავს გუნდის სახელს
         h1_tags = soup.find_all('h1')
         print(f"[DEBUG] ვიპოვე {len(h1_tags)} h1 tag")
         
@@ -102,11 +127,8 @@ class TeamScout:
             text = h1.get_text(strip=True)
             print(f"[DEBUG] h1 ტექსტი: {text}")
             
-            # ვეძებთ გუნდის სახელს რომელიც არ არის title
             if 'состав' not in text.lower() and 'состав команды' not in text.lower():
-                # ვცადოთ ამოვიღოთ გუნდის სახელი
                 if '(' in text and ')' in text:
-                    # ფორმატი: "გუნდი (ქალაქი, ქვეყანა)"
                     match = re.match(r'^([^(]+)\s*\(([^)]+)\)', text)
                     if match:
                         team_data["name"] = match.group(1).strip()
@@ -124,7 +146,6 @@ class TeamScout:
                     print(f"[DEBUG] გუნდის სახელი (h1): {team_data['name']}")
                     break
         
-        # თუ ვერ ვიპოვეთ h1-ში, ვცადოთ meta tags
         if not team_data["name"]:
             meta_title = soup.find('meta', property='og:title')
             if meta_title:
@@ -141,13 +162,11 @@ class TeamScout:
                             team_data["country"] = parts[1].strip()
                         print(f"[DEBUG] გუნდის სახელი (og:title): {team_data['name']}")
         
-        # ლოგო - ვეძებთ og:image meta tag
         og_image = soup.find('meta', property='og:image')
         if og_image:
             team_data["logo_url"] = og_image.get('content', '')
             print(f"[DEBUG] ლოგო (og:image): {team_data['logo_url']}")
         else:
-            # fallback - ვეძებთ img თაგს
             logo_candidates = soup.find_all('img')
             print(f"[DEBUG] ვიპოვე {len(logo_candidates)} img tag")
             for img in logo_candidates:
@@ -165,47 +184,39 @@ class TeamScout:
                         print(f"[DEBUG] ლოგო (img): {team_data['logo_url']}")
                         break
         
-        # ვეძებთ გუნდის დეტალებს - სპეციფიკური კლასებით
         info_elements = soup.find_all(['dl', 'table', 'div'], class_=re.compile(r'team-info|info|details', re.I))
         print(f"[DEBUG] ვიპოვე {len(info_elements)} info element")
         
         for element in info_elements:
             text = element.get_text()
             
-            # სტადიონი
             stadium_match = re.search(r'(?:стадион|stadium)[:\s]+([^\n\r]+)', text, re.I)
             if stadium_match:
                 team_data["stadium"] = stadium_match.group(1).strip()
                 print(f"[DEBUG] სტადიონი: {team_data['stadium']}")
             
-            # ქალაქი
             city_match = re.search(r'(?:город|city)[:\s]+([^\n\r]+)', text, re.I)
             if city_match:
                 team_data["city"] = city_match.group(1).strip()
                 print(f"[DEBUG] ქალაქი: {team_data['city']}")
             
-            # ქვეყანა
             country_match = re.search(r'(?:страна|country)[:\s]+([^\n\r]+)', text, re.I)
             if country_match:
                 team_data["country"] = country_match.group(1).strip()
                 print(f"[DEBUG] ქვეყანა: {team_data['country']}")
             
-            # მწვრთნელი
             coach_match = re.search(r'(?:тренер|coach|главный тренер)[:\s]+([^\n\r]+)', text, re.I)
             if coach_match:
                 team_data["coach"] = coach_match.group(1).strip()
                 print(f"[DEBUG] მწვრთნელი: {team_data['coach']}")
         
-        # Short code - პირველი 3 ასო სახელიდან
         if team_data["name"]:
-            # ვცადოთ ინგლისური ასოები
             english_name = re.sub(r'[^a-zA-Z\s]', '', team_data["name"])
             if english_name:
                 words = english_name.split()
                 if words:
                     team_data["short_code"] = words[0][:3].upper()
             else:
-                # თუ არა ინგლისური, ვიღებთ პირველ 3 ასოს
                 team_data["short_code"] = team_data["name"][:3].upper()
             print(f"[DEBUG] Short code: {team_data['short_code']}")
         
@@ -216,7 +227,6 @@ class TeamScout:
         """მთავარი ფუნქცია - აგროვებს გუნდის ინფორმაციას"""
         print(f"[DEBUG] scout_team - ორიგინალი URL: {url}")
         
-        # ნორმალიზაცია URL
         normalized_url = self.normalize_url(url)
         
         html = await self.fetch_page(normalized_url)
@@ -237,6 +247,137 @@ class TeamScout:
             "data": team_info,
             "raw_html_length": len(html),
             "normalized_url": normalized_url
+        }
+
+# ============================================
+# TextParser Bot - ახალი აგენტი copy-paste ტექსტისთვის
+# ============================================
+class TextParser:
+    """აგენტი რომელიც ამუშავებს მომხმარებლის მიერ ჩაფეისთებულ ტექსტს"""
+    
+    def parse_team_from_text(self, text: str) -> Dict:
+        """პარსავს გუნდის ინფორმაციას ჩაფეისთებული ტექსტიდან"""
+        print(f"[DEBUG] TextParser - ვიწყებ ტექსტის parsing-ს...")
+        
+        team_data = {
+            "name": "",
+            "short_code": "",
+            "city": "",
+            "country": "",
+            "stadium": "",
+            "coach": "",
+            "logo_url": "",
+            "players": []
+        }
+        
+        lines = text.strip().split('\n')
+        
+        # პირველი ხაზი - გუნდის სახელი
+        if lines:
+            team_data["name"] = lines[0].strip()
+            print(f"[DEBUG] გუნდის სახელი: {team_data['name']}")
+        
+        # ვეძებთ "Город, страна" pattern-ს
+        for i, line in enumerate(lines):
+            if 'Город, страна' in line or 'город' in line.lower():
+                # შემდეგი ხაზი არის ქალაქი, ქვეყანა
+                if i + 1 < len(lines):
+                    location_line = lines[i + 1].strip()
+                    if ',' in location_line:
+                        parts = location_line.split(',')
+                        team_data["city"] = parts[0].strip()
+                        team_data["country"] = parts[1].strip()
+                    else:
+                        team_data["city"] = location_line
+                    print(f"[DEBUG] ქალაქი: {team_data['city']}, ქვეყანა: {team_data['country']}")
+                break
+        
+        # ვეძებთ "Стадион" pattern-ს
+        for i, line in enumerate(lines):
+            if 'Стадион' in line:
+                if i + 1 < len(lines):
+                    team_data["stadium"] = lines[i + 1].strip()
+                    print(f"[DEBUG] სტადიონი: {team_data['stadium']}")
+                break
+        
+        # ვეძებთ "Тренер" pattern-ს
+        for i, line in enumerate(lines):
+            if 'Тренер' in line:
+                if i + 1 < len(lines):
+                    team_data["coach"] = lines[i + 1].strip()
+                    print(f"[DEBUG] მწვრთნელი: {team_data['coach']}")
+                break
+        
+        # Short code
+        if team_data["name"]:
+            team_data["short_code"] = team_data["name"][:3].upper()
+            print(f"[DEBUG] Short code: {team_data['short_code']}")
+        
+        # ვეძებთ მოთამაშეებს - ცხრილის ფორმატი
+        # Pattern: ნომერი, სახელი, ამპლუა, დაბადების თარიღი, სიმაღლე, წონა
+        in_players_section = False
+        current_player = {}
+        
+        for i, line in enumerate(lines):
+            line = line.strip()
+            
+            # ვეძებთ "Состав" ან "Заявлены" სექციას
+            if 'Состав' in line or 'Заявлены' in line or 'Игрок' in line:
+                in_players_section = True
+                continue
+            
+            # თუ მოთამაშეების სექციაში ვართ
+            if in_players_section and line:
+                # ვცადოთ ამოვიღოთ ნომერი
+                number_match = re.match(r'^(\d+)\s*$', line)
+                if number_match:
+                    # წინა მოთამაშე თუ არის, შევინახოთ
+                    if current_player and 'name' in current_player:
+                        team_data["players"].append(current_player)
+                    
+                    current_player = {
+                        "shirt_number": int(number_match.group(1)),
+                        "name": "",
+                        "position": "",
+                        "birth_date": "",
+                        "height_cm": None,
+                        "weight_kg": None,
+                        "nationality": ""
+                    }
+                    continue
+                
+                # ვეძებთ მოთამაშის სახელს
+                if current_player and not current_player["name"]:
+                    # სახელი ჩვეულებრივ არის ხანგრძლივი ტექსტი
+                    if len(line) > 5 and not re.match(r'^\d+$', line):
+                        # ვამოწმებთ რომ ეს არის სახელი და არა სხვა ინფორმაცია
+                        if any(keyword in line.lower() for keyword in ['вратарь', 'защитник', 'полузащитник', 'нападающий']):
+                            # ეს არის ამპლუა
+                            current_player["position"] = line
+                        elif re.match(r'\d{2}\.\d{2}\.\d{4}', line):
+                            # ეს არის დაბადების თარიღი
+                            current_player["birth_date"] = line
+                        elif re.match(r'^\d{3}$', line):
+                            # ეს არის სიმაღლე
+                            current_player["height_cm"] = int(line)
+                        elif re.match(r'^\d{2,3}$', line):
+                            # ეს არის წონა
+                            current_player["weight_kg"] = int(line)
+                        else:
+                            # ეს არის სახელი
+                            current_player["name"] = line
+                            print(f"[DEBUG] მოთამაშე: {current_player['name']}")
+        
+        # ბოლო მოთამაშე
+        if current_player and 'name' in current_player:
+            team_data["players"].append(current_player)
+        
+        print(f"[DEBUG] ვიპოვე {len(team_data['players'])} მოთამაშე")
+        
+        return {
+            "success": True,
+            "data": team_data,
+            "players_count": len(team_data["players"])
         }
 
 # ============================================
@@ -292,6 +433,8 @@ class ControllerBot:
         errors = []
         
         for field, value in team_data.items():
+            if field == "players":
+                continue
             is_valid, error_msg = self.validate_field(field, value)
             if not is_valid:
                 errors.append(error_msg)
@@ -369,6 +512,14 @@ async def get_dashboard():
                 from { opacity: 0; transform: translateY(10px); }
                 to { opacity: 1; transform: translateY(0); }
             }
+            .tab-active {
+                background-color: #10b981;
+                color: white;
+            }
+            .tab-inactive {
+                background-color: #374151;
+                color: #9ca3af;
+            }
         </style>
     </head>
     <body class="bg-gradient-to-br from-[#0B0F19] to-[#1a1f2e] text-[#E2E8F0] font-sans min-h-screen p-6">
@@ -378,7 +529,8 @@ async def get_dashboard():
                 <p class="text-gray-400">ავტომატიზებული საფეხბურთო სტატისტიკის სისტემა</p>
             </div>
 
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+            <!-- Agent Cards -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
                 <div id="scout-card" class="bg-[#0E1424] border-2 border-gray-800 rounded-xl p-6 transition-all">
                     <div class="flex items-center justify-between mb-4">
                         <div class="flex items-center gap-3">
@@ -398,9 +550,27 @@ async def get_dashboard():
                             <span class="text-gray-500">სტატუსი:</span>
                             <span id="scout-task" class="text-emerald-400">მოლოდინში</span>
                         </div>
+                    </div>
+                </div>
+
+                <div id="parser-card" class="bg-[#0E1424] border-2 border-gray-800 rounded-xl p-6 transition-all">
+                    <div class="flex items-center justify-between mb-4">
+                        <div class="flex items-center gap-3">
+                            <div class="w-12 h-12 bg-purple-600 rounded-full flex items-center justify-center text-2xl">📝</div>
+                            <div>
+                                <h2 class="text-xl font-bold text-white">TextParser</h2>
+                                <p class="text-sm text-gray-400">ტექსტის ანალიზატორი</p>
+                            </div>
+                        </div>
+                        <div id="parser-status" class="px-3 py-1 bg-gray-700 rounded-full text-xs font-semibold">
+                            ⏸️ მზად
+                        </div>
+                    </div>
+                    <p class="text-sm text-gray-400 mb-3">ამუშავებს ჩაფეისთებულ ტექსტს</p>
+                    <div class="space-y-2 text-xs">
                         <div class="flex justify-between">
-                            <span class="text-gray-500">ბოლო მოპოვება:</span>
-                            <span id="scout-last" class="text-gray-400">არ არის</span>
+                            <span class="text-gray-500">სტატუსი:</span>
+                            <span id="parser-task" class="text-purple-400">მოლოდინში</span>
                         </div>
                     </div>
                 </div>
@@ -421,10 +591,6 @@ async def get_dashboard():
                     <p class="text-sm text-gray-400 mb-3">ამოწმებს მონაცემების სისწორეს</p>
                     <div class="space-y-2 text-xs">
                         <div class="flex justify-between">
-                            <span class="text-gray-500">სტატუსი:</span>
-                            <span id="controller-task" class="text-blue-400">მოლოდინში</span>
-                        </div>
-                        <div class="flex justify-between">
                             <span class="text-gray-500">შემოწმებული:</span>
                             <span id="controller-checked" class="text-gray-400">0 გუნდი</span>
                         </div>
@@ -432,13 +598,24 @@ async def get_dashboard():
                 </div>
             </div>
 
-            <div class="bg-[#0E1424] border border-gray-800 rounded-xl p-6 mb-8">
+            <!-- Tabs -->
+            <div class="flex gap-2 mb-4">
+                <button onclick="switchTab('url')" id="tab-url" class="tab-active px-6 py-3 rounded-lg font-semibold transition-all">
+                    🔗 URL-დან მოპოვება
+                </button>
+                <button onclick="switchTab('paste')" id="tab-paste" class="tab-inactive px-6 py-3 rounded-lg font-semibold transition-all">
+                    📋 ტექსტის ჩასმა
+                </button>
+            </div>
+
+            <!-- URL Input Section -->
+            <div id="section-url" class="bg-[#0E1424] border border-gray-800 rounded-xl p-6 mb-8">
                 <h3 class="text-lg font-bold text-white mb-4">🎯 გუნდის URL</h3>
                 <div class="flex gap-3">
                     <input 
                         id="targetUrl" 
                         type="text" 
-                        value="https://www.championat.com/football/_england/tournament/6592/teams/268572/players/"
+                        value="https://www.championat.com/football/_england/tournament/6592/teams/268572/"
                         placeholder="ჩაწერე გუნდის URL championat.com-დან" 
                         class="flex-1 bg-[#070A13] border border-gray-700 rounded-lg p-3 text-emerald-400 font-mono text-sm focus:outline-none focus:border-emerald-500"
                     >
@@ -452,6 +629,25 @@ async def get_dashboard():
                 </div>
             </div>
 
+            <!-- Paste Text Section -->
+            <div id="section-paste" class="hidden bg-[#0E1424] border border-gray-800 rounded-xl p-6 mb-8">
+                <h3 class="text-lg font-bold text-white mb-4">📋 ჩაფეისთე გვერდის ტექსტი</h3>
+                <textarea 
+                    id="pasteText" 
+                    rows="10"
+                    placeholder="დააკოპირე გვერდის ტექსტი და ჩასვი აქ..."
+                    class="w-full bg-[#070A13] border border-gray-700 rounded-lg p-3 text-purple-400 font-mono text-sm focus:outline-none focus:border-purple-500 resize-none"
+                ></textarea>
+                <button 
+                    onclick="startParsing()" 
+                    id="parseBtn"
+                    class="mt-4 bg-purple-600 hover:bg-purple-500 text-white px-6 py-3 rounded-lg font-semibold transition-all w-full"
+                >
+                    📝 დაამუშავე ტექსტი
+                </button>
+            </div>
+
+            <!-- Process Steps -->
             <div class="bg-[#0E1424] border border-gray-800 rounded-xl p-6 mb-8">
                 <h3 class="text-lg font-bold text-white mb-4">📋 პროცესის ნაბიჯები</h3>
                 <div class="space-y-3">
@@ -460,7 +656,7 @@ async def get_dashboard():
                             <div class="w-8 h-8 bg-gray-700 rounded-full flex items-center justify-center text-sm font-bold">1</div>
                             <div class="flex-1">
                                 <div class="font-semibold text-white">მონაცემების მოპოვება</div>
-                                <div class="text-xs text-gray-400">TeamScout აგროვებს ინფორმაციას საიტიდან</div>
+                                <div class="text-xs text-gray-400">აგენტი აგროვებს ინფორმაციას</div>
                             </div>
                             <div id="step-1-status" class="text-gray-500">⏸️</div>
                         </div>
@@ -488,12 +684,19 @@ async def get_dashboard():
                 </div>
             </div>
 
-            <!-- ახალი: მოპოვებული მონაცემების სექცია -->
+            <!-- Data Display -->
             <div id="data-display" class="hidden bg-[#0E1424] border border-gray-800 rounded-xl p-6 mb-8">
                 <h3 class="text-lg font-bold text-white mb-4">📊 მოპოვებული მონაცემები</h3>
                 <div id="team-data" class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <!-- მონაცემები აქ გამოჩნდება -->
                 </div>
+                
+                <!-- Players Section -->
+                <div id="players-section" class="hidden mt-6">
+                    <h4 class="text-md font-bold text-white mb-3">👥 მოთამაშეები (<span id="players-count">0</span>)</h4>
+                    <div id="players-list" class="bg-[#070A13] border border-gray-700 rounded-lg p-4 max-h-96 overflow-y-auto">
+                    </div>
+                </div>
+                
                 <div class="flex gap-3 mt-6">
                     <button 
                         onclick="confirmData()" 
@@ -510,6 +713,7 @@ async def get_dashboard():
                 </div>
             </div>
 
+            <!-- Live Logs -->
             <div class="bg-[#0E1424] border border-gray-800 rounded-xl p-6">
                 <div class="flex items-center justify-between mb-4">
                     <h3 class="text-lg font-bold text-white">📜 ლაივ ლოგები</h3>
@@ -524,6 +728,17 @@ async def get_dashboard():
         <script>
             let checkedCount = 0;
             let currentTeamData = null;
+            let currentMode = 'url';
+
+            function switchTab(mode) {
+                currentMode = mode;
+                
+                document.getElementById('tab-url').className = mode === 'url' ? 'tab-active px-6 py-3 rounded-lg font-semibold transition-all' : 'tab-inactive px-6 py-3 rounded-lg font-semibold transition-all';
+                document.getElementById('tab-paste').className = mode === 'paste' ? 'tab-active px-6 py-3 rounded-lg font-semibold transition-all' : 'tab-inactive px-6 py-3 rounded-lg font-semibold transition-all';
+                
+                document.getElementById('section-url').classList.toggle('hidden', mode !== 'url');
+                document.getElementById('section-paste').classList.toggle('hidden', mode !== 'paste');
+            }
 
             function startScouting() {
                 const url = document.getElementById('targetUrl').value;
@@ -550,7 +765,6 @@ async def get_dashboard():
                         startBtn.disabled = false;
                         startBtn.textContent = '🚀 გააქტიურე';
                         
-                        // თუ მონაცემები მოვიპოვეთ, ვაჩვენოთ
                         if (data.team_data) {
                             currentTeamData = data.team_data;
                             displayTeamData(data.team_data);
@@ -564,6 +778,47 @@ async def get_dashboard():
                     startBtn.disabled = false;
                     startBtn.textContent = '🚀 გააქტიურე';
                 };
+            }
+
+            function startParsing() {
+                const text = document.getElementById('pasteText').value;
+                const parseBtn = document.getElementById('parseBtn');
+                
+                if (!text.trim()) {
+                    alert('გთხოვთ ჩაწეროთ ტექსტი');
+                    return;
+                }
+
+                parseBtn.disabled = true;
+                parseBtn.textContent = '⏳ მუშაობს...';
+
+                resetUI();
+                
+                fetch('/api/agent/parse-text', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ text: text })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        currentTeamData = data.data;
+                        displayTeamData(data.data);
+                        addLog('TextParser', `✅ წარმატებით დამუშავდა. ვიპოვე ${data.players_count} მოთამაშე`, 'success');
+                    } else {
+                        addLog('TextParser', `❌ შეცდომა: ${data.error}`, 'error');
+                    }
+                    
+                    parseBtn.disabled = false;
+                    parseBtn.textContent = '📝 დაამუშავე ტექსტი';
+                })
+                .catch(error => {
+                    addLog('system', `❌ შეცდომა: ${error.message}`, 'error');
+                    parseBtn.disabled = false;
+                    parseBtn.textContent = '📝 დაამუშავე ტექსტი';
+                });
             }
 
             function displayTeamData(teamData) {
@@ -593,10 +848,37 @@ async def get_dashboard():
                         >
                     </div>
                 `).join('');
+                
+                // Players
+                if (teamData.players && teamData.players.length > 0) {
+                    document.getElementById('players-section').classList.remove('hidden');
+                    document.getElementById('players-count').textContent = teamData.players.length;
+                    
+                    const playersList = document.getElementById('players-list');
+                    playersList.innerHTML = teamData.players.map(player => `
+                        <div class="border-b border-gray-700 py-2 last:border-b-0">
+                            <div class="flex justify-between items-center">
+                                <div>
+                                    <span class="text-emerald-400 font-bold">#${player.shirt_number || '?'}</span>
+                                    <span class="text-white ml-2">${player.name || 'უცნობი'}</span>
+                                </div>
+                                <div class="text-xs text-gray-400">
+                                    ${player.position || ''}
+                                </div>
+                            </div>
+                            <div class="text-xs text-gray-500 mt-1">
+                                ${player.birth_date ? '🎂 ' + player.birth_date : ''}
+                                ${player.height_cm ? ' | 📏 ' + player.height_cm + ' სმ' : ''}
+                                ${player.weight_kg ? ' | ⚖️ ' + player.weight_kg + ' კგ' : ''}
+                            </div>
+                        </div>
+                    `).join('');
+                } else {
+                    document.getElementById('players-section').classList.add('hidden');
+                }
             }
 
             function confirmData() {
-                // ვიღებთ რედაქტირებულ მონაცემებს
                 const inputs = document.querySelectorAll('#team-data input');
                 const updatedData = {};
                 inputs.forEach(input => {
@@ -604,8 +886,6 @@ async def get_dashboard():
                 });
                 
                 addLog('system', '✅ მონაცემები დადასტურდა. ბაზაში ჩაწერა იწყება...', 'success');
-                
-                // აქ დავამატებთ ბაზაში ჩაწერის ლოგიკას მოგვიანებით
                 alert('მონაცემები დადასტურდა! (ბაზაში ჩაწერა მოგვიანებით დაემატება)');
                 
                 document.getElementById('data-display').classList.add('hidden');
@@ -628,9 +908,12 @@ async def get_dashboard():
                 }
 
                 document.getElementById('scout-card').classList.remove('agent-active');
+                document.getElementById('parser-card').classList.remove('agent-active');
                 document.getElementById('controller-card').classList.remove('agent-active');
                 document.getElementById('scout-status').innerHTML = '⏸️ მზად';
                 document.getElementById('scout-status').className = 'px-3 py-1 bg-gray-700 rounded-full text-xs font-semibold';
+                document.getElementById('parser-status').innerHTML = '⏸️ მზად';
+                document.getElementById('parser-status').className = 'px-3 py-1 bg-gray-700 rounded-full text-xs font-semibold';
                 document.getElementById('controller-status').innerHTML = '⏸️ მზად';
                 document.getElementById('controller-status').className = 'px-3 py-1 bg-gray-700 rounded-full text-xs font-semibold';
             }
@@ -648,15 +931,15 @@ async def get_dashboard():
                     document.getElementById('scout-status').innerHTML = '🔄 მუშაობს';
                     document.getElementById('scout-status').className = 'px-3 py-1 bg-emerald-600 rounded-full text-xs font-semibold animate-pulse';
                     document.getElementById('scout-task').textContent = message.substring(0, 30) + '...';
-                    
-                    if (team_name) {
-                        document.getElementById('scout-last').textContent = team_name;
-                    }
+                } else if (agent === 'TextParser') {
+                    document.getElementById('parser-card').classList.add('agent-active');
+                    document.getElementById('parser-status').innerHTML = '🔄 მუშაობს';
+                    document.getElementById('parser-status').className = 'px-3 py-1 bg-purple-600 rounded-full text-xs font-semibold animate-pulse';
+                    document.getElementById('parser-task').textContent = message.substring(0, 30) + '...';
                 } else if (agent === 'Controller') {
                     document.getElementById('controller-card').classList.add('agent-active');
                     document.getElementById('controller-status').innerHTML = '🔄 მუშაობს';
                     document.getElementById('controller-status').className = 'px-3 py-1 bg-blue-600 rounded-full text-xs font-semibold animate-pulse';
-                    document.getElementById('controller-task').textContent = message.substring(0, 30) + '...';
                 }
 
                 if (step) {
@@ -665,9 +948,12 @@ async def get_dashboard():
 
                 if (data.done) {
                     document.getElementById('scout-card').classList.remove('agent-active');
+                    document.getElementById('parser-card').classList.remove('agent-active');
                     document.getElementById('controller-card').classList.remove('agent-active');
                     document.getElementById('scout-status').innerHTML = '✅ დასრულდა';
                     document.getElementById('scout-status').className = 'px-3 py-1 bg-emerald-600 rounded-full text-xs font-semibold';
+                    document.getElementById('parser-status').innerHTML = '✅ დასრულდა';
+                    document.getElementById('parser-status').className = 'px-3 py-1 bg-purple-600 rounded-full text-xs font-semibold';
                     document.getElementById('controller-status').innerHTML = '✅ დასრულდა';
                     document.getElementById('controller-status').className = 'px-3 py-1 bg-blue-600 rounded-full text-xs font-semibold';
                     
@@ -707,6 +993,7 @@ async def get_dashboard():
 
                 const agentColors = {
                     'TeamScout': 'text-emerald-400',
+                    'TextParser': 'text-purple-400',
                     'Controller': 'text-blue-400',
                     'system': 'text-gray-500'
                 };
@@ -732,13 +1019,25 @@ async def get_dashboard():
     """
     return HTMLResponse(content=html_content)
 
+@app.post("/api/agent/parse-text")
+async def parse_text(request: dict):
+    """ამუშავებს მომხმარებლის მიერ ჩაფეისთებულ ტექსტს"""
+    text = request.get("text", "")
+    
+    if not text.strip():
+        return {"success": False, "error": "ტექსტი ცარიელია"}
+    
+    parser = TextParser()
+    result = parser.parse_team_from_text(text)
+    
+    return result
+
 @app.get("/api/agent/stream-scout")
 async def stream_scout(url: str):
     scout = TeamScout()
     controller = ControllerBot()
     
     async def agent_runner():
-        # STEP 1: TeamScout მუშაობს
         yield "data: " + json.dumps({
             "agent": "TeamScout", 
             "message": "🔍 ვიწყებ მონაცემების მოპოვებას...",
@@ -828,7 +1127,6 @@ async def stream_scout(url: str):
         
         await asyncio.sleep(1)
         
-        # STEP 2: Controller Bot მუშაობს
         yield "data: " + json.dumps({
             "agent": "Controller", 
             "message": "🔍 ვიწყებ მონაცემების შემოწმებას...",
@@ -837,7 +1135,6 @@ async def stream_scout(url: str):
         }) + "\n\n"
         await asyncio.sleep(1)
         
-        # Validation
         is_valid, validation_errors = controller.validate_team(team_data)
         
         if not is_valid:
@@ -871,7 +1168,6 @@ async def stream_scout(url: str):
         }) + "\n\n"
         await asyncio.sleep(0.5)
         
-        # STEP 3: ვიზუალიზაცია
         yield "data: " + json.dumps({
             "agent": "Controller", 
             "message": f"📊 მონაცემები მზად არის შესამოწმებლად",
