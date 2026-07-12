@@ -16,7 +16,7 @@ from supabase import create_client, Client
 app = FastAPI()
 
 # ============================================
-# TeamScout Bot - გაუმჯობესებული ვერსია
+# TeamScout Bot - გაუმჯობესებული ვერსია DEBUG-ით
 # ============================================
 class TeamScout:
     def __init__(self):
@@ -35,6 +35,8 @@ class TeamScout:
     
     def normalize_url(self, url: str) -> str:
         """ნორმალიზაცია URL-ს - მოაშორებს /players/ თუ არის"""
+        print(f"[DEBUG] normalize_url - ორიგინალი: {url}")
+        
         # მოვაშოროთ /players/ ბოლოდან
         if url.endswith('/players/'):
             url = url[:-len('/players/')]
@@ -45,28 +47,41 @@ class TeamScout:
         if not url.endswith('/'):
             url += '/'
         
+        print(f"[DEBUG] normalize_url - ნორმალიზებული: {url}")
         return url
     
     async def fetch_page(self, url: str) -> Optional[str]:
         """გადმოწერს HTML გვერდს გაუმჯობესებული headers-ით"""
         try:
+            print(f"[DEBUG] ვცდილობ გადმოწერას: {url}")
+            
             async with httpx.AsyncClient(
                 follow_redirects=True,
                 timeout=30.0,
                 verify=False
             ) as client:
                 response = await client.get(url, headers=self.headers)
+                print(f"[DEBUG] Response status: {response.status_code}")
+                print(f"[DEBUG] Response headers: {dict(response.headers)}")
                 response.raise_for_status()
+                print(f"[DEBUG] HTML სიგრძე: {len(response.text)} bytes")
                 return response.text
         except httpx.HTTPStatusError as e:
-            print(f"HTTP შეცდომა: {e.response.status_code}")
+            print(f"[ERROR] HTTP შეცდომა: {e.response.status_code}")
+            print(f"[ERROR] Response text: {e.response.text[:500]}")
+            return None
+        except httpx.RequestError as e:
+            print(f"[ERROR] Request შეცდომა: {type(e).__name__} - {str(e)}")
             return None
         except Exception as e:
-            print(f"შეცდომა გვერდის გადმოწერისას: {e}")
+            print(f"[ERROR] უცნობი შეცდომა: {type(e).__name__} - {str(e)}")
+            import traceback
+            traceback.print_exc()
             return None
     
     def parse_team_info(self, html: str, url: str) -> Dict:
         """პარსავს გუნდის ინფორმაციას championat.com-დან"""
+        print(f"[DEBUG] ვიწყებ parsing-ს...")
         soup = BeautifulSoup(html, 'lxml')
         
         team_data = {
@@ -81,8 +96,12 @@ class TeamScout:
         
         # გუნდის სახელი - ვეძებთ h1-ს რომელიც შეიცავს გუნდის სახელს
         h1_tags = soup.find_all('h1')
+        print(f"[DEBUG] ვიპოვე {len(h1_tags)} h1 tag")
+        
         for h1 in h1_tags:
             text = h1.get_text(strip=True)
+            print(f"[DEBUG] h1 ტექსტი: {text}")
+            
             # ვეძებთ გუნდის სახელს რომელიც არ არის title
             if 'состав' not in text.lower() and 'состав команды' not in text.lower():
                 # ვცადოთ ამოვიღოთ გუნდის სახელი
@@ -98,9 +117,11 @@ class TeamScout:
                             team_data["country"] = parts[1].strip()
                         else:
                             team_data["city"] = location
+                        print(f"[DEBUG] გუნდის სახელი (h1): {team_data['name']}")
                         break
                 else:
                     team_data["name"] = text
+                    print(f"[DEBUG] გუნდის სახელი (h1): {team_data['name']}")
                     break
         
         # თუ ვერ ვიპოვეთ h1-ში, ვცადოთ meta tags
@@ -108,6 +129,7 @@ class TeamScout:
             meta_title = soup.find('meta', property='og:title')
             if meta_title:
                 title = meta_title.get('content', '')
+                print(f"[DEBUG] og:title: {title}")
                 if '(' in title and ')' in title:
                     match = re.match(r'^([^(]+)\s*\(([^)]+)\)', title)
                     if match:
@@ -117,14 +139,17 @@ class TeamScout:
                             parts = location.split(',')
                             team_data["city"] = parts[0].strip()
                             team_data["country"] = parts[1].strip()
+                        print(f"[DEBUG] გუნდის სახელი (og:title): {team_data['name']}")
         
         # ლოგო - ვეძებთ og:image meta tag
         og_image = soup.find('meta', property='og:image')
         if og_image:
             team_data["logo_url"] = og_image.get('content', '')
+            print(f"[DEBUG] ლოგო (og:image): {team_data['logo_url']}")
         else:
             # fallback - ვეძებთ img თაგს
             logo_candidates = soup.find_all('img')
+            print(f"[DEBUG] ვიპოვე {len(logo_candidates)} img tag")
             for img in logo_candidates:
                 src = img.get('src', '')
                 alt = img.get('alt', '').lower()
@@ -132,15 +157,17 @@ class TeamScout:
                 if any(keyword in alt for keyword in ['лого', 'logo', 'эмблема']):
                     if src.startswith('http'):
                         team_data["logo_url"] = src
+                        print(f"[DEBUG] ლოგო (img): {team_data['logo_url']}")
                         break
                 elif any(keyword in src.lower() for keyword in ['logo', 'crest', 'badge', 'emblem']):
                     if src.startswith('http'):
                         team_data["logo_url"] = src
+                        print(f"[DEBUG] ლოგო (img): {team_data['logo_url']}")
                         break
         
         # ვეძებთ გუნდის დეტალებს - სპეციფიკური კლასებით
-        # ჩვეულებრივ championat.com-ზე არის dl ან table ელემენტები
         info_elements = soup.find_all(['dl', 'table', 'div'], class_=re.compile(r'team-info|info|details', re.I))
+        print(f"[DEBUG] ვიპოვე {len(info_elements)} info element")
         
         for element in info_elements:
             text = element.get_text()
@@ -149,21 +176,25 @@ class TeamScout:
             stadium_match = re.search(r'(?:стадион|stadium)[:\s]+([^\n\r]+)', text, re.I)
             if stadium_match:
                 team_data["stadium"] = stadium_match.group(1).strip()
+                print(f"[DEBUG] სტადიონი: {team_data['stadium']}")
             
             # ქალაქი
             city_match = re.search(r'(?:город|city)[:\s]+([^\n\r]+)', text, re.I)
             if city_match:
                 team_data["city"] = city_match.group(1).strip()
+                print(f"[DEBUG] ქალაქი: {team_data['city']}")
             
             # ქვეყანა
             country_match = re.search(r'(?:страна|country)[:\s]+([^\n\r]+)', text, re.I)
             if country_match:
                 team_data["country"] = country_match.group(1).strip()
+                print(f"[DEBUG] ქვეყანა: {team_data['country']}")
             
             # მწვრთნელი
             coach_match = re.search(r'(?:тренер|coach|главный тренер)[:\s]+([^\n\r]+)', text, re.I)
             if coach_match:
                 team_data["coach"] = coach_match.group(1).strip()
+                print(f"[DEBUG] მწვრთნელი: {team_data['coach']}")
         
         # Short code - პირველი 3 ასო სახელიდან
         if team_data["name"]:
@@ -176,23 +207,29 @@ class TeamScout:
             else:
                 # თუ არა ინგლისური, ვიღებთ პირველ 3 ასოს
                 team_data["short_code"] = team_data["name"][:3].upper()
+            print(f"[DEBUG] Short code: {team_data['short_code']}")
         
+        print(f"[DEBUG] Parsing დასრულდა. მონაცემები: {team_data}")
         return team_data
     
     async def scout_team(self, url: str) -> Dict:
         """მთავარი ფუნქცია - აგროვებს გუნდის ინფორმაციას"""
+        print(f"[DEBUG] scout_team - ორიგინალი URL: {url}")
+        
         # ნორმალიზაცია URL
         normalized_url = self.normalize_url(url)
         
         html = await self.fetch_page(normalized_url)
         
         if not html:
+            print(f"[ERROR] HTML ცარიელია")
             return {
                 "success": False,
-                "error": "ვერ მოხერხდა გვერდის გადმოწერა. შეამოწმეთ URL ან სცადეთ მოგვიანებით.",
+                "error": f"ვერ მოხერხდა გვერდის გადმოწერა. URL: {normalized_url}",
                 "data": None
             }
         
+        print(f"[DEBUG] წარმატებით ჩაიტვირთა HTML")
         team_info = self.parse_team_info(html, normalized_url)
         
         return {
@@ -401,7 +438,7 @@ async def get_dashboard():
                     <input 
                         id="targetUrl" 
                         type="text" 
-                        value="https://www.championat.com/football/_england/tournament/6592/teams/268572/"
+                        value="https://www.championat.com/football/_england/tournament/6592/teams/268572/players/"
                         placeholder="ჩაწერე გუნდის URL championat.com-დან" 
                         class="flex-1 bg-[#070A13] border border-gray-700 rounded-lg p-3 text-emerald-400 font-mono text-sm focus:outline-none focus:border-emerald-500"
                     >
