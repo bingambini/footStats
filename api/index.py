@@ -16,26 +16,43 @@ from supabase import create_client, Client
 app = FastAPI()
 
 # ============================================
-# TeamScout Bot
+# TeamScout Bot - გაუმჯობესებული ვერსია
 # ============================================
 class TeamScout:
     def __init__(self):
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8"
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Cache-Control": "max-age=0"
         }
     
     async def fetch_page(self, url: str) -> Optional[str]:
+        """გადმოწერს HTML გვერდს გაუმჯობესებული headers-ით"""
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(url, headers=self.headers, timeout=30.0, follow_redirects=True)
+            async with httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=30.0,
+                verify=False  # SSL verification-ს ვთიშავთ
+            ) as client:
+                response = await client.get(url, headers=self.headers)
                 response.raise_for_status()
                 return response.text
+        except httpx.HTTPStatusError as e:
+            print(f"HTTP შეცდომა: {e.response.status_code}")
+            return None
         except Exception as e:
             print(f"შეცდომა გვერდის გადმოწერისას: {e}")
             return None
     
     def parse_team_info(self, html: str, url: str) -> Dict:
+        """პარსავს გუნდის ინფორმაციას championat.com-დან"""
         soup = BeautifulSoup(html, 'lxml')
         
         team_data = {
@@ -48,53 +65,63 @@ class TeamScout:
             "logo_url": ""
         }
         
-        # გუნდის სახელი
+        # გუნდის სახელი - h1 ან title
         title = soup.find('h1')
         if title:
             team_data["name"] = title.get_text(strip=True)
+        else:
+            # fallback - title tag
+            title_tag = soup.find('title')
+            if title_tag:
+                team_data["name"] = title_tag.get_text(strip=True).split(' - ')[0]
         
-        # ლოგო
+        # ლოგო - ვეძებთ img თაგს
         logo_candidates = soup.find_all('img')
         for img in logo_candidates:
             src = img.get('src', '')
             alt = img.get('alt', '').lower()
             
-            if any(keyword in alt for keyword in ['лого', 'logo', 'эмблема']):
+            # ვეძებთ ლოგოს URL-ში ან alt text-ში
+            if any(keyword in alt for keyword in ['лого', 'logo', 'эмблема', 'crest', 'badge']):
                 if src.startswith('http'):
                     team_data["logo_url"] = src
                     break
-            elif 'logo' in src.lower() or 'crest' in src.lower() or 'badge' in src.lower():
+            elif any(keyword in src.lower() for keyword in ['logo', 'crest', 'badge', 'emblem']):
                 if src.startswith('http'):
                     team_data["logo_url"] = src
                     break
         
-        # დეტალები
-        info_blocks = soup.find_all('div', class_=re.compile(r'info|detail|team', re.I))
+        # ვეძებთ გუნდის დეტალებს
+        info_blocks = soup.find_all(['div', 'dl', 'ul'], class_=re.compile(r'info|detail|team|about', re.I))
         
         for block in info_blocks:
             text = block.get_text()
             
+            # სტადიონი
             if 'стадион' in text.lower() or 'stadium' in text.lower():
-                match = re.search(r'[:\-]\s*([A-Za-zА-Яа-яЁё\s]+)', text)
+                match = re.search(r'[:\-]\s*([A-Za-zА-Яа-яЁё\s\-\(\)]+)', text)
                 if match:
                     team_data["stadium"] = match.group(1).strip()
             
+            # ქალაქი
             if 'город' in text.lower() or 'city' in text.lower():
-                match = re.search(r'[:\-]\s*([A-Za-zА-Яа-яЁё\s]+)', text)
+                match = re.search(r'[:\-]\s*([A-Za-zА-Яа-яЁё\s\-]+)', text)
                 if match:
                     team_data["city"] = match.group(1).strip()
             
+            # ქვეყანა
             if 'страна' in text.lower() or 'country' in text.lower():
-                match = re.search(r'[:\-]\s*([A-Za-zА-Яа-яЁё\s]+)', text)
+                match = re.search(r'[:\-]\s*([A-Za-zА-Яа-яЁё\s\-]+)', text)
                 if match:
                     team_data["country"] = match.group(1).strip()
             
-            if 'тренер' in text.lower() or 'coach' in text.lower():
-                match = re.search(r'[:\-]\s*([A-Za-zА-Яа-яЁё\s]+)', text)
+            # მწვრთნელი
+            if 'тренер' in text.lower() or 'coach' in text.lower() or 'главный тренер' in text.lower():
+                match = re.search(r'[:\-]\s*([A-Za-zА-Яа-яЁё\s\-]+)', text)
                 if match:
                     team_data["coach"] = match.group(1).strip()
         
-        # Short code
+        # Short code - პირველი 3 ასო სახელიდან
         if team_data["name"]:
             words = team_data["name"].split()
             if words:
@@ -103,12 +130,13 @@ class TeamScout:
         return team_data
     
     async def scout_team(self, url: str) -> Dict:
+        """მთავარი ფუნქცია - აგროვებს გუნდის ინფორმაციას"""
         html = await self.fetch_page(url)
         
         if not html:
             return {
                 "success": False,
-                "error": "ვერ მოხერხდა გვერდის გადმოწერა",
+                "error": "ვერ მოხერხდა გვერდის გადმოწერა. შეამოწმეთ URL ან სცადეთ მოგვიანებით.",
                 "data": None
             }
         
@@ -116,11 +144,12 @@ class TeamScout:
         
         return {
             "success": True,
-            "data": team_info
+            "data": team_info,
+            "raw_html_length": len(html)
         }
 
 # ============================================
-# Controller Bot
+# Controller Bot - ვალიდაცია მხოლოდ, ჩაწერა არა
 # ============================================
 class ControllerBot:
     def __init__(self):
@@ -191,49 +220,6 @@ class ControllerBot:
             return False, ""
         except Exception as e:
             return False, f"შეცდომა duplicate check-ისას: {str(e)}"
-    
-    async def save_team(self, team_data: Dict) -> Tuple[bool, str]:
-        if not self.supabase:
-            return False, "Supabase არ არის დაკონფიგურირებული"
-        
-        try:
-            team_record = {
-                "name": team_data["name"],
-                "short_code": team_data["short_code"],
-                "city": team_data["city"] or None,
-                "country": team_data["country"] or None,
-                "stadium": team_data["stadium"] or None,
-                "coach": team_data["coach"] or None,
-                "logo_url": team_data["logo_url"] or None
-            }
-            
-            response = self.supabase.table("teams").insert(team_record).execute()
-            
-            if response.data:
-                return True, f"გუნდი '{team_data['name']}' წარმატებით ჩაიწერა ბაზაში (ID: {response.data[0]['id']})"
-            else:
-                return False, "ვერ მოხერხდა ბაზაში ჩაწერა"
-                
-        except Exception as e:
-            return False, f"შეცდომა ჩაწერისას: {str(e)}"
-    
-    async def process_team(self, team_data: Dict) -> Tuple[bool, List[str], str]:
-        is_valid, validation_errors = self.validate_team(team_data)
-        
-        if not is_valid:
-            return False, validation_errors, "ვალიდაცია ვერ გაიარა"
-        
-        is_duplicate, duplicate_msg = await self.check_duplicate(team_data)
-        
-        if is_duplicate:
-            return False, [duplicate_msg], "გუნდი უკვე არსებობს"
-        
-        save_success, save_msg = await self.save_team(team_data)
-        
-        if not save_success:
-            return False, [save_msg], "შეცდომა ჩაწერისას"
-        
-        return True, [], save_msg
 
 # ============================================
 # API Endpoints
@@ -285,6 +271,13 @@ async def get_dashboard():
             .step-pending {
                 border-left: 4px solid #6b7280;
             }
+            .data-card {
+                animation: fadeIn 0.5s ease-out;
+            }
+            @keyframes fadeIn {
+                from { opacity: 0; transform: translateY(10px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
         </style>
     </head>
     <body class="bg-gradient-to-br from-[#0B0F19] to-[#1a1f2e] text-[#E2E8F0] font-sans min-h-screen p-6">
@@ -334,7 +327,7 @@ async def get_dashboard():
                             ⏸️ მზად
                         </div>
                     </div>
-                    <p class="text-sm text-gray-400 mb-3">ამოწმებს მონაცემებს და ინახავს ბაზაში</p>
+                    <p class="text-sm text-gray-400 mb-3">ამოწმებს მონაცემების სისწორეს</p>
                     <div class="space-y-2 text-xs">
                         <div class="flex justify-between">
                             <span class="text-gray-500">სტატუსი:</span>
@@ -395,12 +388,34 @@ async def get_dashboard():
                         <div class="flex items-center gap-3">
                             <div class="w-8 h-8 bg-gray-700 rounded-full flex items-center justify-center text-sm font-bold">3</div>
                             <div class="flex-1">
-                                <div class="font-semibold text-white">ბაზაში ჩაწერა</div>
-                                <div class="text-xs text-gray-400">მონაცემები ინახება Supabase-ში</div>
+                                <div class="font-semibold text-white">მონაცემების ვიზუალიზაცია</div>
+                                <div class="text-xs text-gray-400">მონაცემები გამოჩნდება შესამოწმებლად</div>
                             </div>
                             <div id="step-3-status" class="text-gray-500">⏸️</div>
                         </div>
                     </div>
+                </div>
+            </div>
+
+            <!-- ახალი: მოპოვებული მონაცემების სექცია -->
+            <div id="data-display" class="hidden bg-[#0E1424] border border-gray-800 rounded-xl p-6 mb-8">
+                <h3 class="text-lg font-bold text-white mb-4">📊 მოპოვებული მონაცემები</h3>
+                <div id="team-data" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <!-- მონაცემები აქ გამოჩნდება -->
+                </div>
+                <div class="flex gap-3 mt-6">
+                    <button 
+                        onclick="confirmData()" 
+                        class="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-3 rounded-lg font-semibold transition-all"
+                    >
+                        ✅ დადასტურება და ბაზაში ჩაწერა
+                    </button>
+                    <button 
+                        onclick="rejectData()" 
+                        class="flex-1 bg-red-600 hover:bg-red-500 text-white px-6 py-3 rounded-lg font-semibold transition-all"
+                    >
+                        ❌ უარყოფა
+                    </button>
                 </div>
             </div>
 
@@ -417,6 +432,7 @@ async def get_dashboard():
 
         <script>
             let checkedCount = 0;
+            let currentTeamData = null;
 
             function startScouting() {
                 const url = document.getElementById('targetUrl').value;
@@ -442,6 +458,12 @@ async def get_dashboard():
                         eventSource.close();
                         startBtn.disabled = false;
                         startBtn.textContent = '🚀 გააქტიურე';
+                        
+                        // თუ მონაცემები მოვიპოვეთ, ვაჩვენოთ
+                        if (data.team_data) {
+                            currentTeamData = data.team_data;
+                            displayTeamData(data.team_data);
+                        }
                     }
                 };
 
@@ -453,8 +475,60 @@ async def get_dashboard():
                 };
             }
 
+            function displayTeamData(teamData) {
+                const dataDisplay = document.getElementById('data-display');
+                const teamDataDiv = document.getElementById('team-data');
+                
+                dataDisplay.classList.remove('hidden');
+                
+                const fields = [
+                    { label: '🏆 გუნდის სახელი', value: teamData.name, key: 'name' },
+                    { label: '🔤 მოკლე კოდი', value: teamData.short_code, key: 'short_code' },
+                    { label: '🏟️ სტადიონი', value: teamData.stadium || 'არ არის მითითებული', key: 'stadium' },
+                    { label: '🏙️ ქალაქი', value: teamData.city || 'არ არის მითითებული', key: 'city' },
+                    { label: '🌍 ქვეყანა', value: teamData.country || 'არ არის მითითებული', key: 'country' },
+                    { label: '👔 მწვრთნელი', value: teamData.coach || 'არ არის მითითებული', key: 'coach' },
+                    { label: '🖼️ ლოგო', value: teamData.logo_url ? 'მოიძებნა' : 'არ მოიძებნა', key: 'logo_url' }
+                ];
+                
+                teamDataDiv.innerHTML = fields.map(field => `
+                    <div class="data-card bg-[#070A13] border border-gray-700 rounded-lg p-4">
+                        <div class="text-xs text-gray-500 mb-1">${field.label}</div>
+                        <input 
+                            type="text" 
+                            value="${field.value}" 
+                            data-key="${field.key}"
+                            class="w-full bg-transparent text-white font-semibold focus:outline-none focus:border-emerald-500 border-b border-transparent focus:border-b-emerald-500"
+                        >
+                    </div>
+                `).join('');
+            }
+
+            function confirmData() {
+                // ვიღებთ რედაქტირებულ მონაცემებს
+                const inputs = document.querySelectorAll('#team-data input');
+                const updatedData = {};
+                inputs.forEach(input => {
+                    updatedData[input.dataset.key] = input.value;
+                });
+                
+                addLog('system', '✅ მონაცემები დადასტურდა. ბაზაში ჩაწერა იწყება...', 'success');
+                
+                // აქ დავამატებთ ბაზაში ჩაწერის ლოგიკას მოგვიანებით
+                alert('მონაცემები დადასტურდა! (ბაზაში ჩაწერა მოგვიანებით დაემატება)');
+                
+                document.getElementById('data-display').classList.add('hidden');
+            }
+
+            function rejectData() {
+                addLog('system', '❌ მონაცემები უარყოფილია', 'error');
+                document.getElementById('data-display').classList.add('hidden');
+                currentTeamData = null;
+            }
+
             function resetUI() {
                 document.getElementById('terminal').innerHTML = '';
+                document.getElementById('data-display').classList.add('hidden');
                 
                 for (let i = 1; i <= 3; i++) {
                     const step = document.getElementById(`step-${i}`);
@@ -573,6 +647,7 @@ async def stream_scout(url: str):
     controller = ControllerBot()
     
     async def agent_runner():
+        # STEP 1: TeamScout მუშაობს
         yield "data: " + json.dumps({
             "agent": "TeamScout", 
             "message": "🔍 ვიწყებ მონაცემების მოპოვებას...",
@@ -604,7 +679,7 @@ async def stream_scout(url: str):
         
         yield "data: " + json.dumps({
             "agent": "TeamScout", 
-            "message": f"✅ გვერდი წარმატებით ჩაიტვირთა",
+            "message": f"✅ გვერდი წარმატებით ჩაიტვირთა ({result.get('raw_html_length', 0)} bytes)",
             "step": 1,
             "status": "completed"
         }) + "\n\n"
@@ -612,7 +687,7 @@ async def stream_scout(url: str):
         
         yield "data: " + json.dumps({
             "agent": "TeamScout", 
-            "message": f"🏆 გუნდი: {team_data['name']}",
+            "message": f"🏆 გუნდი: {team_data['name'] or 'არ მოიძებნა'}",
             "team_name": team_data['name'],
             "step": 1,
             "status": "completed"
@@ -662,6 +737,7 @@ async def stream_scout(url: str):
         
         await asyncio.sleep(1)
         
+        # STEP 2: Controller Bot მუშაობს
         yield "data: " + json.dumps({
             "agent": "Controller", 
             "message": "🔍 ვიწყებ მონაცემების შემოწმებას...",
@@ -670,6 +746,7 @@ async def stream_scout(url: str):
         }) + "\n\n"
         await asyncio.sleep(1)
         
+        # Validation
         is_valid, validation_errors = controller.validate_team(team_data)
         
         if not is_valid:
@@ -688,7 +765,7 @@ async def stream_scout(url: str):
                 }) + "\n\n"
             yield "data: " + json.dumps({
                 "agent": "Controller", 
-                "message": f"🚫 მონაცემები არ ჩაიწერა ბაზაში",
+                "message": f"🚫 მონაცემები არ გადის ვალიდაციას",
                 "step": 3,
                 "status": "error",
                 "done": True
@@ -703,64 +780,14 @@ async def stream_scout(url: str):
         }) + "\n\n"
         await asyncio.sleep(0.5)
         
+        # STEP 3: ვიზუალიზაცია
         yield "data: " + json.dumps({
             "agent": "Controller", 
-            "message": f"🔎 ვამოწმებ თუ უკვე არსებობს ბაზაში...",
-            "step": 2,
-            "status": "active"
-        }) + "\n\n"
-        
-        is_duplicate, duplicate_msg = await controller.check_duplicate(team_data)
-        
-        if is_duplicate:
-            yield "data: " + json.dumps({
-                "agent": "Controller", 
-                "message": f"⚠️ {duplicate_msg}",
-                "step": 2,
-                "status": "error"
-            }) + "\n\n"
-            yield "data: " + json.dumps({
-                "agent": "Controller", 
-                "message": f"🚫 გუნდი უკვე არსებობს ბაზაში",
-                "step": 3,
-                "status": "error",
-                "done": True
-            }) + "\n\n"
-            return
-        
-        yield "data: " + json.dumps({
-            "agent": "Controller", 
-            "message": f"✅ გუნდი არ არის ბაზაში",
-            "step": 2,
-            "status": "completed"
-        }) + "\n\n"
-        await asyncio.sleep(0.5)
-        
-        yield "data: " + json.dumps({
-            "agent": "Controller", 
-            "message": f"💾 ვინახავ მონაცემებს ბაზაში...",
-            "step": 3,
-            "status": "active"
-        }) + "\n\n"
-        
-        save_success, save_msg = await controller.save_team(team_data)
-        
-        if not save_success:
-            yield "data: " + json.dumps({
-                "agent": "Controller", 
-                "message": f"❌ {save_msg}",
-                "step": 3,
-                "status": "error",
-                "done": True
-            }) + "\n\n"
-            return
-        
-        yield "data: " + json.dumps({
-            "agent": "Controller", 
-            "message": f"✅ {save_msg}",
+            "message": f"📊 მონაცემები მზად არის შესამოწმებლად",
             "step": 3,
             "status": "completed",
-            "done": True
+            "done": True,
+            "team_data": team_data
         }) + "\n\n"
     
     return StreamingResponse(agent_runner(), media_type="text/event-stream")
