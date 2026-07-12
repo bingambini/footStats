@@ -10,38 +10,53 @@ app = FastAPI()
 url: str = os.environ.get("SUPABASE_URL", "")
 key: str = os.environ.get("SUPABASE_ANON_KEY", "")
 
-if not url or not key:
-    # ლოკალური დეველოპმენტისთვის ან თუ ცვლადები ჯერ არ ჩაჯდა
-    url = "YOUR_SUPABASE_URL"
-    key = "YOUR_SUPABASE_ANON_KEY"
+# ბაზასთან კავშირი (მხოლოდ თუ გასაღებები არსებობს)
+supabase: Client = None
+if url and key:
+    supabase = create_client(url, key)
 
-supabase: Client = create_client(url, key)
-
-# Pydantic მოდელი მონაცემების ვალიდაციისთვის
 class PlayerInput(BaseModel):
     shirt_number: Optional[int] = None
     first_name: str
     last_name: str
     primary_position: str
-    birth_date: Optional[str] = None # YYYY-MM-DD ფორმატში
+    birth_date: Optional[str] = None
     height_cm: Optional[int] = None
     weight_kg: Optional[int] = None
 
+# მთავარი გვერდისთვის (რომ საიტზე შესვლისას 404 არ დაგვხვდეს)
+@app.get("/")
+@app.get("/api")
+def read_root():
+    return {
+        "message": "Welcome to Football Analytics API Engine!",
+        "endpoints": {
+            "status": "/api/status",
+            "import_players": "/api/import-players"
+        }
+    }
+
+# სტატუსის შემოწმება (მულტი-მარშრუტით)
+@app.get("/status")
 @app.get("/api/status")
 def get_status():
     return {
         "status": "online",
         "engine": "Python + FastAPI on Vercel",
-        "database": "Supabase PostgreSQL Linked"
+        "database_connected": supabase is not None
     }
 
+# მოთამაშეების იმპორტი
+@app.post("/import-players")
 @app.post("/api/import-players")
 def import_players(players: List[PlayerInput]):
+    if not supabase:
+        raise HTTPException(status_code=500, detail="Supabase კავშირი არ არის კონფიგურირებული Vercel-ში")
+        
     inserted_count = 0
     errors = []
 
     for p in players:
-        # ვამზადებთ მონაცემებს Supabase-ის ცხრილისთვის
         player_data = {
             "first_name": p.first_name,
             "last_name": p.last_name,
@@ -50,20 +65,15 @@ def import_players(players: List[PlayerInput]):
             "height_cm": p.height_cm,
             "weight_kg": p.weight_kg
         }
-        
         try:
-            # ვწერთ `players` ცხრილში
             response = supabase.table("players").insert(player_data).execute()
             if response.data:
                 inserted_count += 1
         except Exception as e:
-            errors.append(f"შეცდომა მოთამაშეზე {p.first_name} {p.last_name}: {str(e)}")
-
-    if errors and inserted_count == 0:
-        raise HTTPException(status_code=400, detail={"message": "იმპორტი ჩაიშალა", "errors": errors})
+            errors.append(f"შეცდომა: {p.first_name} {p.last_name} - {str(e)}")
 
     return {
-        "message": "იმპორტი წარმატებით დასრულდა",
+        "message": "იმპორტის პროცესი დასრულდა",
         "inserted_players": inserted_count,
-        "errors_encountered": errors
+        "errors": errors
     }
