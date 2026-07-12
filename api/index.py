@@ -13,11 +13,23 @@ from supabase import create_client, Client
 app = FastAPI()
 
 # ============================================
-# API Vault
+# Supabase Client
+# ============================================
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+
+def get_supabase():
+    if SUPABASE_URL and SUPABASE_KEY:
+        return create_client(SUPABASE_URL, SUPABASE_KEY)
+    return None
+
+# ============================================
+# API Vault - Supabase-ში შენახვით
 # ============================================
 class APIVault:
     def __init__(self):
-        self.providers = {
+        self.supabase = get_supabase()
+        self.providers_cache = {
             "google": {
                 "name": "Google Gemini",
                 "api_key": None,
@@ -33,13 +45,66 @@ class APIVault:
                 "selected_model": None
             }
         }
+        # ჩავტვირთოთ გასაღებები Supabase-დან
+        asyncio.create_task(self.load_from_db())
+    
+    async def load_from_db(self):
+        """ჩავტვირთოთ გასაღებები Supabase-დან"""
+        if not self.supabase:
+            print("[APIVault] Supabase არ არის დაკონფიგურირებული")
+            return
+        
+        try:
+            response = self.supabase.table("api_keys").select("*").execute()
+            for row in response.data:
+                provider = row["provider"]
+                if provider in self.providers_cache:
+                    self.providers_cache[provider]["api_key"] = row["api_key"]
+                    self.providers_cache[provider]["selected_model"] = row.get("selected_model")
+                    self.providers_cache[provider]["available_models"] = row.get("available_models") or []
+                    print(f"[APIVault] {provider} გასაღები ჩაიტვირთა DB-დან")
+        except Exception as e:
+            print(f"[APIVault] DB ჩატვირთვის შეცდომა: {e}")
+    
+    async def save_to_db(self, provider: str):
+        """შევინახოთ გასაღები Supabase-ში"""
+        if not self.supabase:
+            return False, "Supabase არ არის"
+        
+        try:
+            config = self.providers_cache[provider]
+            data = {
+                "provider": provider,
+                "api_key": config["api_key"],
+                "selected_model": config["selected_model"],
+                "available_models": config["available_models"]
+            }
+            
+            # ვამოწმებთ არსებობს თუ არა
+            existing = self.supabase.table("api_keys").select("id").eq("provider", provider).execute()
+            
+            if existing.data:
+                # განვაახლოთ
+                self.supabase.table("api_keys").update(data).eq("provider", provider).execute()
+            else:
+                # ჩავწეროთ
+                self.supabase.table("api_keys").insert(data).execute()
+            
+            print(f"[APIVault] {provider} შენახულია DB-ში")
+            return True, "წარმატება"
+        except Exception as e:
+            print(f"[APIVault] DB შენახვის შეცდომა: {e}")
+            return False, str(e)
     
     def set_api_key(self, provider: str, api_key: str):
-        if provider in self.providers:
-            self.providers[provider]["api_key"] = api_key
+        if provider in self.providers_cache:
+            self.providers_cache[provider]["api_key"] = api_key
+    
+    def get_provider(self, provider: str) -> Dict:
+        return self.providers_cache.get(provider, {})
     
     async def fetch_available_models(self, provider: str) -> List[str]:
-        config = self.providers[provider]
+        config = self.providers_cache[provider]
         api_key = config["api_key"]
         if not api_key:
             return []
@@ -68,11 +133,11 @@ class APIVault:
                         config["available_models"] = [m["id"] for m in data.get("data", [])]
                         return config["available_models"]
         except Exception as e:
-            print(f"[APIVault] Error: {e}")
+            print(f"[APIVault] {provider} მოდელების შეცდომა: {e}")
         return []
     
     def select_best_model(self, provider: str) -> Optional[str]:
-        config = self.providers[provider]
+        config = self.providers_cache[provider]
         models = config["available_models"]
         if not models:
             return None
@@ -92,7 +157,7 @@ class APIVault:
         return models[0]
     
     async def initialize_provider(self, provider: str) -> Tuple[bool, str]:
-        config = self.providers[provider]
+        config = self.providers_cache[provider]
         if not config["api_key"]:
             return False, f"{config['name']} გასაღები არ არის"
         
@@ -103,6 +168,9 @@ class APIVault:
         selected = self.select_best_model(provider)
         if not selected:
             return False, "მოდელი ვერ აირჩია"
+        
+        # შევინახოთ DB-ში
+        await self.save_to_db(provider)
         
         return True, f"{config['name']} მზად. მოდელი: {selected}"
 
@@ -148,21 +216,32 @@ class TeamScout:
             return None, f"{type(e).__name__}: {str(e)}"
     
     async def fetch_with_google(self, url: str) -> Tuple[Optional[str], str]:
-        config = self.api_vault.providers["google"]
-        if not config["api_key"] or not config["selected_model"]:
+        config = self.api_vault.get_provider("google")
+        if not config.get("api_key") or not config.get("selected_model"):
             return None, "Google არ არის ინიციალიზებული"
         
         try:
             model = config["selected_model"]
             api_url = f"{config['base_url']}/models/{model}:generateContent?key={config['api_key']}"
             
-            prompt = f"""წაიკითხე ეს URL და ამოიღე გუნდის ინფორმაცია JSON ფორმატში:
+            # გაუმჯობესებული prompt
+            prompt = f"""შეამოწმე ეს საფეხბურთო გუნდის URL და ამოიღე ზუსტი ინფორმაცია:
 URL: {url}
 
-დაბრუნდი მხოლოდ JSON:
+მნიშვნელოვანი ინსტრუქციები:
+- "name" არის გუნდის ოფიციალური სახელი (მაგალითად: "არსენალი", "ბარსელონა", "რეალი")
+- "name" არ უნდა იყოს მწვრთნელის სახელი!
+- "short_code" არის გუნდის მოკლე კოდი (3-5 ასო, მაგ: "ARS", "BAR", "RMA")
+- "city" არის გუნდის ქალაქი
+- "country" არის გუნდის ქვეყანა
+- "stadium" არის გუნდის სტადიონის სახელი
+- "coach" არის მთავარი მწვრთნელის სახელი და გვარი
+- "logo_url" არის გუნდის ლოგოს სრული URL
+
+დაბრუნდი მხოლოდ JSON ამ ფორმატში, სხვა ტექსტის გარეშე:
 {{
     "name": "გუნდის სახელი",
-    "short_code": "3-5 ასო",
+    "short_code": "მოკლე კოდი",
     "city": "ქალაქი",
     "country": "ქვეყანა",
     "stadium": "სტადიონი",
@@ -187,8 +266,8 @@ URL: {url}
             return None, f"{type(e).__name__}: {str(e)}"
     
     async def fetch_with_groq(self, url: str) -> Tuple[Optional[str], str]:
-        config = self.api_vault.providers["groq"]
-        if not config["api_key"] or not config["selected_model"]:
+        config = self.api_vault.get_provider("groq")
+        if not config.get("api_key") or not config.get("selected_model"):
             return None, "Groq არ არის ინიციალიზებული"
         
         try:
@@ -196,13 +275,24 @@ URL: {url}
             api_url = f"{config['base_url']}/chat/completions"
             headers = {"Authorization": f"Bearer {config['api_key']}", "Content-Type": "application/json"}
             
-            prompt = f"""წაიკითხე ეს URL და ამოიღე გუნდის ინფორმაცია JSON ფორმატში:
+            # გაუმჯობესებული prompt
+            prompt = f"""შეამოწმე ეს საფეხბურთო გუნდის URL და ამოიღე ზუსტი ინფორმაცია:
 URL: {url}
 
-დაბრუნდი მხოლოდ JSON:
+მნიშვნელოვანი ინსტრუქციები:
+- "name" არის გუნდის ოფიციალური სახელი (მაგალითად: "არსენალი", "ბარსელონა", "რეალი")
+- "name" არ უნდა იყოს მწვრთნელის სახელი!
+- "short_code" არის გუნდის მოკლე კოდი (3-5 ასო, მაგ: "ARS", "BAR", "RMA")
+- "city" არის გუნდის ქალაქი
+- "country" არის გუნდის ქვეყანა
+- "stadium" არის გუნდის სტადიონის სახელი
+- "coach" არის მთავარი მწვრთნელის სახელი და გვარი
+- "logo_url" არის გუნდის ლოგოს სრული URL
+
+დაბრუნდი მხოლოდ JSON ამ ფორმატში, სხვა ტექსტის გარეშე:
 {{
     "name": "გუნდის სახელი",
-    "short_code": "3-5 ასო",
+    "short_code": "მოკლე კოდი",
     "city": "ქალაქი",
     "country": "ქვეყანა",
     "stadium": "სტადიონი",
@@ -230,6 +320,7 @@ URL: {url}
     def parse_ai_response(self, ai_text: str) -> Dict:
         team_data = {"name": "", "short_code": "", "city": "", "country": "", "stadium": "", "coach": "", "logo_url": ""}
         try:
+            # ვეძებთ JSON-ს ტექსტში
             json_match = re.search(r'\{[^{}]*\}', ai_text, re.DOTALL)
             if json_match:
                 data = json.loads(json_match.group(0))
@@ -286,6 +377,19 @@ class ControllerBot:
 async def root():
     return {"message": "FootStats API is running!"}
 
+@app.get("/api/vault/status")
+async def get_vault_status():
+    """მივიღოთ API გასაღებების სტატუსი"""
+    status = {}
+    for provider in ["google", "groq"]:
+        config = api_vault.get_provider(provider)
+        status[provider] = {
+            "has_key": bool(config.get("api_key")),
+            "selected_model": config.get("selected_model"),
+            "models_count": len(config.get("available_models", []))
+        }
+    return status
+
 @app.post("/api/vault/set-key")
 async def set_api_key(request: dict):
     provider = request.get("provider")
@@ -293,7 +397,14 @@ async def set_api_key(request: dict):
     if not provider or not api_key:
         return {"success": False, "error": "provider და api_key აუცილებელია"}
     api_vault.set_api_key(provider, api_key)
-    return {"success": True, "message": f"{provider} გასაღები დაყენებულია"}
+    
+    # შევინახოთ DB-ში
+    success, msg = await api_vault.save_to_db(provider)
+    
+    if success:
+        return {"success": True, "message": f"{provider} გასაღები შენახულია"}
+    else:
+        return {"success": False, "error": msg}
 
 @app.post("/api/vault/initialize")
 async def initialize_provider(request: dict):
@@ -301,11 +412,12 @@ async def initialize_provider(request: dict):
     if not provider:
         return {"success": False, "error": "provider აუცილებელია"}
     success, message = await api_vault.initialize_provider(provider)
+    config = api_vault.get_provider(provider)
     return {
         "success": success,
         "message": message,
-        "models": api_vault.providers[provider]["available_models"],
-        "selected_model": api_vault.providers[provider]["selected_model"]
+        "models": config.get("available_models", []),
+        "selected_model": config.get("selected_model")
     }
 
 @app.post("/api/agent/parse-text")
@@ -353,13 +465,13 @@ async def get_dashboard():
 
             <!-- API Vault -->
             <div class="bg-[#0E1424] border-2 border-yellow-600 rounded-xl p-6 mb-8">
-                <h3 class="text-lg font-bold text-yellow-400 mb-4">🔐 API გასაღებების საცავი</h3>
+                <h3 class="text-lg font-bold text-yellow-400 mb-4">🔐 API გასაღებების საცავი (Supabase-ში ინახება)</h3>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div class="bg-[#070A13] border border-gray-700 rounded-lg p-4">
                         <div class="flex items-center gap-2 mb-2">
                             <span class="text-2xl">🔵</span>
                             <h4 class="font-bold text-white">Google Gemini</h4>
-                            <span id="google-status" class="ml-auto px-2 py-1 bg-gray-700 rounded text-xs">⏸️ არ არის</span>
+                            <span id="google-status" class="ml-auto px-2 py-1 bg-gray-700 rounded text-xs">⏸️ იტვირთება...</span>
                         </div>
                         <input id="google-key" type="password" placeholder="Google API გასაღები" class="w-full bg-[#0B0F19] border border-gray-700 rounded p-2 text-sm text-emerald-400 mb-2">
                         <button onclick="setKey('google')" class="w-full bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm font-semibold">💾 შენახვა</button>
@@ -370,7 +482,7 @@ async def get_dashboard():
                         <div class="flex items-center gap-2 mb-2">
                             <span class="text-2xl">🟠</span>
                             <h4 class="font-bold text-white">Groq</h4>
-                            <span id="groq-status" class="ml-auto px-2 py-1 bg-gray-700 rounded text-xs">⏸️ არ არის</span>
+                            <span id="groq-status" class="ml-auto px-2 py-1 bg-gray-700 rounded text-xs">⏸️ იტვირთება...</span>
                         </div>
                         <input id="groq-key" type="password" placeholder="Groq API გასაღები" class="w-full bg-[#0B0F19] border border-gray-700 rounded p-2 text-sm text-emerald-400 mb-2">
                         <button onclick="setKey('groq')" class="w-full bg-orange-600 hover:bg-orange-500 text-white px-4 py-2 rounded text-sm font-semibold">💾 შენახვა</button>
@@ -464,6 +576,38 @@ async def get_dashboard():
         <script>
             let currentTeamData = null;
 
+            // გვერდის ჩატვირთვისას შევამოწმოთ სტატუსი
+            window.addEventListener('DOMContentLoaded', async () => {
+                try {
+                    const response = await fetch('/api/vault/status');
+                    const status = await response.json();
+                    
+                    for (const provider of ['google', 'groq']) {
+                        const info = status[provider];
+                        const statusEl = document.getElementById(`${provider}-status`);
+                        
+                        if (info.has_key) {
+                            if (info.selected_model) {
+                                statusEl.innerHTML = `✅ მზად (${info.selected_model})`;
+                                statusEl.className = 'ml-auto px-2 py-1 bg-emerald-600 rounded text-xs';
+                                document.getElementById(`${provider}-models`).innerHTML = `
+                                    <div class="text-emerald-400">✓ ${info.models_count} მოდელი</div>
+                                    <div class="text-yellow-400">🎯 ${info.selected_model}</div>
+                                `;
+                            } else {
+                                statusEl.innerHTML = '✅ გასაღები შენახულია';
+                                statusEl.className = 'ml-auto px-2 py-1 bg-yellow-600 rounded text-xs';
+                            }
+                        } else {
+                            statusEl.innerHTML = '⏸️ არ არის';
+                            statusEl.className = 'ml-auto px-2 py-1 bg-gray-700 rounded text-xs';
+                        }
+                    }
+                } catch (error) {
+                    console.error('Status check error:', error);
+                }
+            });
+
             function switchTab(mode) {
                 document.getElementById('tab-url').className = mode === 'url' ? 'tab-active px-6 py-3 rounded-lg font-semibold' : 'tab-inactive px-6 py-3 rounded-lg font-semibold';
                 document.getElementById('tab-paste').className = mode === 'paste' ? 'tab-active px-6 py-3 rounded-lg font-semibold' : 'tab-inactive px-6 py-3 rounded-lg font-semibold';
@@ -483,9 +627,9 @@ async def get_dashboard():
                     });
                     const data = await response.json();
                     if (data.success) {
-                        addLog('APIVault', `✅ ${provider} გასაღები შენახულია`, 'success');
+                        addLog('APIVault', `✅ ${provider} გასაღები შენახულია Supabase-ში`, 'success');
                         document.getElementById(`${provider}-status`).innerHTML = '✅ შენახულია';
-                        document.getElementById(`${provider}-status`).className = 'ml-auto px-2 py-1 bg-emerald-600 rounded text-xs';
+                        document.getElementById(`${provider}-status`).className = 'ml-auto px-2 py-1 bg-yellow-600 rounded text-xs';
                     } else {
                         addLog('APIVault', `❌ ${data.error}`, 'error');
                     }
@@ -508,7 +652,7 @@ async def get_dashboard():
                         addLog('APIVault', `✅ ${data.message}`, 'success');
                         addLog('APIVault', `📋 მოდელები: ${data.models.join(', ')}`, 'info');
                         addLog('APIVault', `🎯 არჩეული: ${data.selected_model}`, 'success');
-                        document.getElementById(`${provider}-status`).innerHTML = '✅ მზად';
+                        document.getElementById(`${provider}-status`).innerHTML = `✅ მზად (${data.selected_model})`;
                         document.getElementById(`${provider}-status`).className = 'ml-auto px-2 py-1 bg-emerald-600 rounded text-xs';
                         document.getElementById(`${provider}-models`).innerHTML = `<div class="text-emerald-400">✓ ${data.models.length} მოდელი</div><div class="text-yellow-400">🎯 ${data.selected_model}</div>`;
                     } else {
@@ -587,7 +731,8 @@ async def get_dashboard():
                     { label: '🏟️ სტადიონი', value: teamData.stadium || '', key: 'stadium' },
                     { label: '🏙️ ქალაქი', value: teamData.city || '', key: 'city' },
                     { label: '🌍 ქვეყანა', value: teamData.country || '', key: 'country' },
-                    { label: '👔 მწვრთნელი', value: teamData.coach || '', key: 'coach' }
+                    { label: '👔 მწვრთნელი', value: teamData.coach || '', key: 'coach' },
+                    { label: '🖼️ ლოგო', value: teamData.logo_url || '', key: 'logo_url' }
                 ];
                 document.getElementById('team-data').innerHTML = fields.map(field => `
                     <div class="bg-[#070A13] border border-gray-700 rounded-lg p-4">
@@ -681,6 +826,8 @@ async def stream_scout(url: str):
         
         html, direct_msg = await scout.fetch_page_direct(normalized_url)
         
+        team_data = None
+        
         if html:
             yield "data: " + json.dumps({"agent": "TeamScout", "message": f"✅ პირდაპირი წარმატება! {direct_msg}", "step": 1, "status": "completed"}) + "\n\n"
             team_data = {"name": "HTML-დან", "short_code": "HTML", "city": "", "country": "", "stadium": "", "coach": "", "logo_url": ""}
@@ -689,8 +836,9 @@ async def stream_scout(url: str):
             yield "data: " + json.dumps({"agent": "TeamScout", "message": "💡 საიტი ბლოკავს ავტომატიზებულ requests-ს", "step": 1, "status": "error"}) + "\n\n"
             
             # STEP 2: Google
+            google_config = api_vault.get_provider("google")
             yield "data: " + json.dumps({"agent": "TeamScout", "message": "🔵 მცდელობა 2: Google Gemini...", "step": 1, "status": "active"}) + "\n\n"
-            yield "data: " + json.dumps({"agent": "TeamScout", "message": f"🤖 მოდელი: {api_vault.providers['google']['selected_model'] or 'არ არის არჩეული'}", "step": 1, "status": "active"}) + "\n\n"
+            yield "data: " + json.dumps({"agent": "TeamScout", "message": f"🤖 მოდელი: {google_config.get('selected_model') or 'არ არის არჩეული'}", "step": 1, "status": "active"}) + "\n\n"
             yield "data: " + json.dumps({"agent": "TeamScout", "message": "📝 ვაგზავნი prompt-ს Google-ში...", "step": 1, "status": "active"}) + "\n\n"
             await asyncio.sleep(0.5)
             
@@ -705,8 +853,9 @@ async def stream_scout(url: str):
                 yield "data: " + json.dumps({"agent": "TeamScout", "message": f"❌ Google წარუმატებელი: {google_msg}", "step": 1, "status": "error"}) + "\n\n"
                 
                 # STEP 3: Groq
+                groq_config = api_vault.get_provider("groq")
                 yield "data: " + json.dumps({"agent": "TeamScout", "message": "🟠 მცდელობა 3: Groq...", "step": 1, "status": "active"}) + "\n\n"
-                yield "data: " + json.dumps({"agent": "TeamScout", "message": f"🤖 მოდელი: {api_vault.providers['groq']['selected_model'] or 'არ არის არჩეული'}", "step": 1, "status": "active"}) + "\n\n"
+                yield "data: " + json.dumps({"agent": "TeamScout", "message": f"🤖 მოდელი: {groq_config.get('selected_model') or 'არ არის არჩეული'}", "step": 1, "status": "active"}) + "\n\n"
                 await asyncio.sleep(0.5)
                 
                 ai_text, groq_msg = await scout.fetch_with_groq(url)
@@ -719,6 +868,10 @@ async def stream_scout(url: str):
                     yield "data: " + json.dumps({"agent": "TeamScout", "message": f"❌ Groq წარუმატებელი: {groq_msg}", "step": 1, "status": "error"}) + "\n\n"
                     yield "data: " + json.dumps({"agent": "TeamScout", "message": "❌ ყველა მეთოდი წარუმატებელია!", "step": 1, "status": "error", "done": True}) + "\n\n"
                     return
+        
+        if not team_data:
+            yield "data: " + json.dumps({"agent": "TeamScout", "message": "❌ მონაცემები ვერ მოიპოვა", "step": 1, "status": "error", "done": True}) + "\n\n"
+            return
         
         # STEP 2: Controller
         yield "data: " + json.dumps({"agent": "Controller", "message": "🔍 ვიწყებ ვალიდაციას...", "step": 2, "status": "active"}) + "\n\n"
