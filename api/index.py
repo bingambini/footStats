@@ -16,10 +16,148 @@ from supabase import create_client, Client
 app = FastAPI()
 
 # ============================================
-# TeamScout Bot - გაუმჯობესებული ვერსია DEBUG-ით
+# API Vault - გასაღებების მენეჯერი
+# ============================================
+class APIVault:
+    """API გასაღებების საცავი და მენეჯერი"""
+    
+    def __init__(self):
+        self.providers = {
+            "google": {
+                "name": "Google Gemini",
+                "api_key": None,
+                "base_url": "https://generativelanguage.googleapis.com/v1beta",
+                "available_models": [],
+                "selected_model": None
+            },
+            "groq": {
+                "name": "Groq",
+                "api_key": None,
+                "base_url": "https://api.groq.com/openai/v1",
+                "available_models": [],
+                "selected_model": None
+            }
+        }
+    
+    def set_api_key(self, provider: str, api_key: str):
+        """აყენებს API გასაღებს"""
+        if provider in self.providers:
+            self.providers[provider]["api_key"] = api_key
+            print(f"[API Vault] {provider} გასაღები დაყენებულია")
+    
+    async def fetch_available_models(self, provider: str) -> List[str]:
+        """გამოითხოვს ხელმისაწვდომ მოდელებს"""
+        if provider not in self.providers:
+            return []
+        
+        config = self.providers[provider]
+        api_key = config["api_key"]
+        
+        if not api_key:
+            print(f"[API Vault] {provider} გასაღები არ არის დაყენებული")
+            return []
+        
+        try:
+            if provider == "google":
+                # Google Gemini - list models
+                url = f"{config['base_url']}/models?key={api_key}"
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(url, timeout=10.0)
+                    if response.status_code == 200:
+                        data = response.json()
+                        models = []
+                        for model in data.get("models", []):
+                            name = model.get("name", "")
+                            # ვიღებთ მხოლოდ უფასო მოდელებს (flash variants)
+                            if "flash" in name.lower() or "pro" in name.lower():
+                                models.append(name.replace("models/", ""))
+                        config["available_models"] = models
+                        print(f"[API Vault] Google {len(models)} მოდელი ხელმისაწვდომია: {models}")
+                        return models
+            
+            elif provider == "groq":
+                # Groq - list models
+                url = f"{config['base_url']}/models"
+                headers = {
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                }
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(url, headers=headers, timeout=10.0)
+                    if response.status_code == 200:
+                        data = response.json()
+                        models = [m["id"] for m in data.get("data", [])]
+                        config["available_models"] = models
+                        print(f"[API Vault] Groq {len(models)} მოდელი ხელმისაწვდომია: {models}")
+                        return models
+        
+        except Exception as e:
+            print(f"[API Vault] {provider} მოდელების გამოთხოვის შეცდომა: {e}")
+        
+        return []
+    
+    def select_best_model(self, provider: str) -> Optional[str]:
+        """ირჩევს საუკეთესო მოდელს"""
+        config = self.providers[provider]
+        models = config["available_models"]
+        
+        if not models:
+            return None
+        
+        # ვირჩევთ უფასო/სწრაფ მოდელებს პრიორიტეტით
+        if provider == "google":
+            # ვეძებთ flash მოდელებს (უფასო)
+            for model in models:
+                if "flash" in model.lower():
+                    config["selected_model"] = model
+                    print(f"[API Vault] Google არჩეული მოდელი: {model}")
+                    return model
+            # თუ flash არ არის, ვირჩევთ პირველს
+            config["selected_model"] = models[0]
+            return models[0]
+        
+        elif provider == "groq":
+            # Groq-ზე ვირჩევთ llama-3.3-70b ან მსგავსს
+            for model in models:
+                if "llama-3.3" in model.lower() or "llama-3" in model.lower():
+                    config["selected_model"] = model
+                    print(f"[API Vault] Groq არჩეული მოდელი: {model}")
+                    return model
+            config["selected_model"] = models[0]
+            return models[0]
+        
+        return None
+    
+    async def initialize_provider(self, provider: str) -> Tuple[bool, str]:
+        """ინიციალიზაცია პროვაიდერს - ამოწმებს გასაღებს და ირჩევს მოდელს"""
+        if provider not in self.providers:
+            return False, "პროვაიდერი არ არსებობს"
+        
+        config = self.providers[provider]
+        
+        if not config["api_key"]:
+            return False, f"{config['name']} API გასაღები არ არის დაყენებული"
+        
+        # ვითხოვთ მოდელებს
+        models = await self.fetch_available_models(provider)
+        
+        if not models:
+            return False, f"{config['name']} მოდელები ვერ მოიძებნა"
+        
+        # ვირჩევთ საუკეთესო მოდელს
+        selected = self.select_best_model(provider)
+        
+        if not selected:
+            return False, f"{config['name']} ვერ აირჩია მოდელი"
+        
+        return True, f"{config['name']} მზად არის. მოდელი: {selected}"
+
+# ============================================
+# TeamScout Bot - AI-გაუმჯობესებული ვერსია
 # ============================================
 class TeamScout:
-    def __init__(self):
+    def __init__(self, api_vault: APIVault):
+        self.api_vault = api_vault
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
@@ -38,15 +176,9 @@ class TeamScout:
             "Sec-Ch-Ua-Mobile": "?0",
             "Sec-Ch-Ua-Platform": '"macOS"'
         }
-        self.cookies = {
-            "_ga": "GA1.2.1234567890.1234567890",
-            "_gid": "GA1.2.0987654321.0987654321"
-        }
     
     def normalize_url(self, url: str) -> str:
-        """ნორმალიზაცია URL-ს - მოაშორებს /players/ თუ არის"""
-        print(f"[DEBUG] normalize_url - ორიგინალი: {url}")
-        
+        """ნორმალიზაცია URL-ს"""
         if url.endswith('/players/'):
             url = url[:-len('/players/')]
         elif url.endswith('/players'):
@@ -55,59 +187,234 @@ class TeamScout:
         if not url.endswith('/'):
             url += '/'
         
-        print(f"[DEBUG] normalize_url - ნორმალიზებული: {url}")
         return url
     
-    async def fetch_page(self, url: str) -> Optional[str]:
-        """გადმოწერს HTML გვერდს გაუმჯობესებული headers-ით"""
+    async def fetch_page_direct(self, url: str) -> Optional[str]:
+        """პირდაპირ ცდილობს გვერდის გადმოწერას"""
         try:
-            print(f"[DEBUG] ვცდილობ გადმოწერას: {url}")
+            print(f"[TeamScout] ვცდილობ პირდაპირ გადმოწერას: {url}")
             
-            for attempt in range(3):
-                print(f"[DEBUG] მცდელობა {attempt + 1}/3")
-                
+            for attempt in range(2):
                 async with httpx.AsyncClient(
                     follow_redirects=True,
                     timeout=30.0,
                     verify=False
                 ) as client:
-                    response = await client.get(
-                        url, 
-                        headers=self.headers,
-                        cookies=self.cookies
-                    )
-                    print(f"[DEBUG] Response status: {response.status_code}")
+                    response = await client.get(url, headers=self.headers)
+                    print(f"[TeamScout] Response status: {response.status_code}")
                     
                     if response.status_code == 200:
-                        print(f"[DEBUG] HTML სიგრძე: {len(response.text)} bytes")
+                        print(f"[TeamScout] HTML სიგრძე: {len(response.text)} bytes")
                         return response.text
-                    elif response.status_code == 403:
-                        print(f"[ERROR] 403 Forbidden - საიტი ბლოკავს requests-ს")
-                        if attempt < 2:
-                            print(f"[DEBUG] ვცდილობ თავიდან...")
-                            await asyncio.sleep(2)
-                            continue
+                    elif response.status_code in [403, 429]:
+                        print(f"[TeamScout] {response.status_code} - ბლოკი, ვცდილობ თავიდან...")
+                        await asyncio.sleep(1)
+                        continue
                     else:
-                        print(f"[ERROR] HTTP შეცდომა: {response.status_code}")
                         response.raise_for_status()
             
             return None
-            
-        except httpx.HTTPStatusError as e:
-            print(f"[ERROR] HTTP შეცდომა: {e.response.status_code}")
-            return None
-        except httpx.RequestError as e:
-            print(f"[ERROR] Request შეცდომა: {type(e).__name__} - {str(e)}")
-            return None
         except Exception as e:
-            print(f"[ERROR] უცნობი შეცდომა: {type(e).__name__} - {str(e)}")
-            import traceback
-            traceback.print_exc()
+            print(f"[TeamScout] პირდაპირი გადმოწერის შეცდომა: {e}")
             return None
     
+    async def fetch_with_google(self, url: str) -> Tuple[Optional[str], str]:
+        """იყენებს Google Gemini-ს გვერდის წასაკითხად"""
+        config = self.api_vault.providers["google"]
+        
+        if not config["api_key"] or not config["selected_model"]:
+            return None, "Google API არ არის ინიციალიზებული"
+        
+        try:
+            model = config["selected_model"]
+            api_url = f"{config['base_url']}/models/{model}:generateContent?key={config['api_key']}"
+            
+            prompt = f"""წაიკითხე ეს URL და ამოიღე გუნდის ინფორმაცია JSON ფორმატში:
+URL: {url}
+
+დაბრუნდი მხოლოდ JSON ამ სტრუქტურით:
+{{
+    "name": "გუნდის სახელი",
+    "short_code": "3-5 ასო",
+    "city": "ქალაქი",
+    "country": "ქვეყანა",
+    "stadium": "სტადიონი",
+    "coach": "მწვრთნელი",
+    "logo_url": "ლოგოს URL"
+}}
+
+თუ ვერ იპოვი რაიმე ველი, დატოვე ცარიელი."""
+
+            payload = {
+                "contents": [{
+                    "parts": [{"text": prompt}]
+                }],
+                "tools": [{
+                    "google_search": {}
+                }]
+            }
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.post(api_url, json=payload, timeout=60.0)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                    print(f"[TeamScout] Google-მა დააბრუნა: {text[:200]}...")
+                    return text, "წარმატება"
+                else:
+                    return None, f"Google API შეცდომა: {response.status_code}"
+        
+        except Exception as e:
+            return None, f"Google შეცდომა: {str(e)}"
+    
+    async def fetch_with_groq(self, url: str) -> Tuple[Optional[str], str]:
+        """იყენებს Groq-ს გვერდის წასაკითხად"""
+        config = self.api_vault.providers["groq"]
+        
+        if not config["api_key"] or not config["selected_model"]:
+            return None, "Groq API არ არის ინიციალიზებული"
+        
+        try:
+            model = config["selected_model"]
+            api_url = f"{config['base_url']}/chat/completions"
+            
+            headers = {
+                "Authorization": f"Bearer {config['api_key']}",
+                "Content-Type": "application/json"
+            }
+            
+            prompt = f"""წაიკითხე ეს URL და ამოიღე გუნდის ინფორმაცია JSON ფორმატში:
+URL: {url}
+
+დაბრუნდი მხოლოდ JSON ამ სტრუქტურით:
+{{
+    "name": "გუნდის სახელი",
+    "short_code": "3-5 ასო",
+    "city": "ქალაქი",
+    "country": "ქვეყანა",
+    "stadium": "სტადიონი",
+    "coach": "მწვრთნელი",
+    "logo_url": "ლოგოს URL"
+}}
+
+თუ ვერ იპოვი რაიმე ველი, დატოვე ცარიელი."""
+
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.1
+            }
+            
+            async with httpx.AsyncClient() as client:
+                response = await client.post(api_url, headers=headers, json=payload, timeout=60.0)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    print(f"[TeamScout] Groq-მა დააბრუნა: {text[:200]}...")
+                    return text, "წარმატება"
+                else:
+                    return None, f"Groq API შეცდომა: {response.status_code}"
+        
+        except Exception as e:
+            return None, f"Groq შეცდომა: {str(e)}"
+    
+    def parse_ai_response(self, ai_text: str) -> Dict:
+        """პარსავს AI-ის პასუხს JSON-ად"""
+        team_data = {
+            "name": "",
+            "short_code": "",
+            "city": "",
+            "country": "",
+            "stadium": "",
+            "coach": "",
+            "logo_url": ""
+        }
+        
+        try:
+            # ვეძებთ JSON-ს ტექსტში
+            json_match = re.search(r'\{[^{}]*\}', ai_text, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+                data = json.loads(json_str)
+                
+                team_data["name"] = data.get("name", "")
+                team_data["short_code"] = data.get("short_code", "")
+                team_data["city"] = data.get("city", "")
+                team_data["country"] = data.get("country", "")
+                team_data["stadium"] = data.get("stadium", "")
+                team_data["coach"] = data.get("coach", "")
+                team_data["logo_url"] = data.get("logo_url", "")
+                
+                print(f"[TeamScout] AI პასუხი წარმატებით დაპარსულია: {team_data}")
+        except Exception as e:
+            print(f"[TeamScout] AI პასუხის პარსინგის შეცდომა: {e}")
+        
+        return team_data
+    
+    async def scout_team(self, url: str) -> Dict:
+        """მთავარი ფუნქცია - აგროვებს გუნდის ინფორმაციას"""
+        normalized_url = self.normalize_url(url)
+        print(f"[TeamScout] ნორმალიზებული URL: {normalized_url}")
+        
+        # STEP 1: ვცდილობთ პირდაპირ გადმოწერას
+        print("[TeamScout] STEP 1: პირდაპირი გადმოწერა...")
+        html = await self.fetch_page_direct(normalized_url)
+        
+        if html:
+            print("[TeamScout] პირდაპირი გადმოწერა წარმატებით დასრულდა!")
+            # TODO: დავამატოთ HTML parsing ლოგიკა
+            return {
+                "success": True,
+                "data": self.parse_team_info(html, normalized_url),
+                "method": "direct",
+                "raw_html_length": len(html)
+            }
+        
+        # STEP 2: ვცდილობთ Google Gemini-ს
+        print("[TeamScout] STEP 2: Google Gemini...")
+        ai_text, ai_msg = await self.fetch_with_google(normalized_url)
+        
+        if ai_text:
+            print(f"[TeamScout] Google წარმატება: {ai_msg}")
+            team_data = self.parse_ai_response(ai_text)
+            return {
+                "success": True,
+                "data": team_data,
+                "method": "google",
+                "model": self.api_vault.providers["google"]["selected_model"]
+            }
+        
+        print(f"[TeamScout] Google წარუმატებელი: {ai_msg}")
+        
+        # STEP 3: ვცდილობთ Groq-ს
+        print("[TeamScout] STEP 3: Groq...")
+        ai_text, ai_msg = await self.fetch_with_groq(normalized_url)
+        
+        if ai_text:
+            print(f"[TeamScout] Groq წარმატება: {ai_msg}")
+            team_data = self.parse_ai_response(ai_text)
+            return {
+                "success": True,
+                "data": team_data,
+                "method": "groq",
+                "model": self.api_vault.providers["groq"]["selected_model"]
+            }
+        
+        print(f"[TeamScout] Groq წარუმატებელი: {ai_msg}")
+        
+        # ყველა მეთოდი წარუმატებელია
+        return {
+            "success": False,
+            "error": "ვერცერთმა მეთოდმა ვერ მოახერხა მონაცემების მოპოვება",
+            "data": None
+        }
+    
     def parse_team_info(self, html: str, url: str) -> Dict:
-        """პარსავს გუნდის ინფორმაციას championat.com-დან"""
-        print(f"[DEBUG] ვიწყებ parsing-ს...")
+        """პარსავს გუნდის ინფორმაციას HTML-დან"""
         soup = BeautifulSoup(html, 'lxml')
         
         team_data = {
@@ -120,14 +427,11 @@ class TeamScout:
             "logo_url": ""
         }
         
+        # გუნდის სახელი
         h1_tags = soup.find_all('h1')
-        print(f"[DEBUG] ვიპოვე {len(h1_tags)} h1 tag")
-        
         for h1 in h1_tags:
             text = h1.get_text(strip=True)
-            print(f"[DEBUG] h1 ტექსტი: {text}")
-            
-            if 'состав' not in text.lower() and 'состав команды' not in text.lower():
+            if 'состав' not in text.lower():
                 if '(' in text and ')' in text:
                     match = re.match(r'^([^(]+)\s*\(([^)]+)\)', text)
                     if match:
@@ -137,128 +441,27 @@ class TeamScout:
                             parts = location.split(',')
                             team_data["city"] = parts[0].strip()
                             team_data["country"] = parts[1].strip()
-                        else:
-                            team_data["city"] = location
-                        print(f"[DEBUG] გუნდის სახელი (h1): {team_data['name']}")
-                        break
                 else:
                     team_data["name"] = text
-                    print(f"[DEBUG] გუნდის სახელი (h1): {team_data['name']}")
-                    break
+                break
         
-        if not team_data["name"]:
-            meta_title = soup.find('meta', property='og:title')
-            if meta_title:
-                title = meta_title.get('content', '')
-                print(f"[DEBUG] og:title: {title}")
-                if '(' in title and ')' in title:
-                    match = re.match(r'^([^(]+)\s*\(([^)]+)\)', title)
-                    if match:
-                        team_data["name"] = match.group(1).strip()
-                        location = match.group(2).strip()
-                        if ',' in location:
-                            parts = location.split(',')
-                            team_data["city"] = parts[0].strip()
-                            team_data["country"] = parts[1].strip()
-                        print(f"[DEBUG] გუნდის სახელი (og:title): {team_data['name']}")
-        
+        # ლოგო
         og_image = soup.find('meta', property='og:image')
         if og_image:
             team_data["logo_url"] = og_image.get('content', '')
-            print(f"[DEBUG] ლოგო (og:image): {team_data['logo_url']}")
-        else:
-            logo_candidates = soup.find_all('img')
-            print(f"[DEBUG] ვიპოვე {len(logo_candidates)} img tag")
-            for img in logo_candidates:
-                src = img.get('src', '')
-                alt = img.get('alt', '').lower()
-                
-                if any(keyword in alt for keyword in ['лого', 'logo', 'эмблема']):
-                    if src.startswith('http'):
-                        team_data["logo_url"] = src
-                        print(f"[DEBUG] ლოგო (img): {team_data['logo_url']}")
-                        break
-                elif any(keyword in src.lower() for keyword in ['logo', 'crest', 'badge', 'emblem']):
-                    if src.startswith('http'):
-                        team_data["logo_url"] = src
-                        print(f"[DEBUG] ლოგო (img): {team_data['logo_url']}")
-                        break
         
-        info_elements = soup.find_all(['dl', 'table', 'div'], class_=re.compile(r'team-info|info|details', re.I))
-        print(f"[DEBUG] ვიპოვე {len(info_elements)} info element")
-        
-        for element in info_elements:
-            text = element.get_text()
-            
-            stadium_match = re.search(r'(?:стадион|stadium)[:\s]+([^\n\r]+)', text, re.I)
-            if stadium_match:
-                team_data["stadium"] = stadium_match.group(1).strip()
-                print(f"[DEBUG] სტადიონი: {team_data['stadium']}")
-            
-            city_match = re.search(r'(?:город|city)[:\s]+([^\n\r]+)', text, re.I)
-            if city_match:
-                team_data["city"] = city_match.group(1).strip()
-                print(f"[DEBUG] ქალაქი: {team_data['city']}")
-            
-            country_match = re.search(r'(?:страна|country)[:\s]+([^\n\r]+)', text, re.I)
-            if country_match:
-                team_data["country"] = country_match.group(1).strip()
-                print(f"[DEBUG] ქვეყანა: {team_data['country']}")
-            
-            coach_match = re.search(r'(?:тренер|coach|главный тренер)[:\s]+([^\n\r]+)', text, re.I)
-            if coach_match:
-                team_data["coach"] = coach_match.group(1).strip()
-                print(f"[DEBUG] მწვრთნელი: {team_data['coach']}")
-        
+        # Short code
         if team_data["name"]:
-            english_name = re.sub(r'[^a-zA-Z\s]', '', team_data["name"])
-            if english_name:
-                words = english_name.split()
-                if words:
-                    team_data["short_code"] = words[0][:3].upper()
-            else:
-                team_data["short_code"] = team_data["name"][:3].upper()
-            print(f"[DEBUG] Short code: {team_data['short_code']}")
+            team_data["short_code"] = team_data["name"][:3].upper()
         
-        print(f"[DEBUG] Parsing დასრულდა. მონაცემები: {team_data}")
         return team_data
-    
-    async def scout_team(self, url: str) -> Dict:
-        """მთავარი ფუნქცია - აგროვებს გუნდის ინფორმაციას"""
-        print(f"[DEBUG] scout_team - ორიგინალი URL: {url}")
-        
-        normalized_url = self.normalize_url(url)
-        
-        html = await self.fetch_page(normalized_url)
-        
-        if not html:
-            print(f"[ERROR] HTML ცარიელია")
-            return {
-                "success": False,
-                "error": f"ვერ მოხერხდა გვერდის გადმოწერა. URL: {normalized_url}",
-                "data": None
-            }
-        
-        print(f"[DEBUG] წარმატებით ჩაიტვირთა HTML")
-        team_info = self.parse_team_info(html, normalized_url)
-        
-        return {
-            "success": True,
-            "data": team_info,
-            "raw_html_length": len(html),
-            "normalized_url": normalized_url
-        }
 
 # ============================================
-# TextParser Bot - ახალი აგენტი copy-paste ტექსტისთვის
+# TextParser Bot
 # ============================================
 class TextParser:
-    """აგენტი რომელიც ამუშავებს მომხმარებლის მიერ ჩაფეისთებულ ტექსტს"""
-    
     def parse_team_from_text(self, text: str) -> Dict:
         """პარსავს გუნდის ინფორმაციას ჩაფეისთებული ტექსტიდან"""
-        print(f"[DEBUG] TextParser - ვიწყებ ტექსტის parsing-ს...")
-        
         team_data = {
             "name": "",
             "short_code": "",
@@ -272,107 +475,33 @@ class TextParser:
         
         lines = text.strip().split('\n')
         
-        # პირველი ხაზი - გუნდის სახელი
         if lines:
             team_data["name"] = lines[0].strip()
-            print(f"[DEBUG] გუნდის სახელი: {team_data['name']}")
         
-        # ვეძებთ "Город, страна" pattern-ს
         for i, line in enumerate(lines):
-            if 'Город, страна' in line or 'город' in line.lower():
-                # შემდეგი ხაზი არის ქალაქი, ქვეყანა
+            if 'Город, страна' in line:
                 if i + 1 < len(lines):
                     location_line = lines[i + 1].strip()
                     if ',' in location_line:
                         parts = location_line.split(',')
                         team_data["city"] = parts[0].strip()
                         team_data["country"] = parts[1].strip()
-                    else:
-                        team_data["city"] = location_line
-                    print(f"[DEBUG] ქალაქი: {team_data['city']}, ქვეყანა: {team_data['country']}")
                 break
         
-        # ვეძებთ "Стадион" pattern-ს
         for i, line in enumerate(lines):
             if 'Стадион' in line:
                 if i + 1 < len(lines):
                     team_data["stadium"] = lines[i + 1].strip()
-                    print(f"[DEBUG] სტადიონი: {team_data['stadium']}")
                 break
         
-        # ვეძებთ "Тренер" pattern-ს
         for i, line in enumerate(lines):
             if 'Тренер' in line:
                 if i + 1 < len(lines):
                     team_data["coach"] = lines[i + 1].strip()
-                    print(f"[DEBUG] მწვრთნელი: {team_data['coach']}")
                 break
         
-        # Short code
         if team_data["name"]:
             team_data["short_code"] = team_data["name"][:3].upper()
-            print(f"[DEBUG] Short code: {team_data['short_code']}")
-        
-        # ვეძებთ მოთამაშეებს - ცხრილის ფორმატი
-        # Pattern: ნომერი, სახელი, ამპლუა, დაბადების თარიღი, სიმაღლე, წონა
-        in_players_section = False
-        current_player = {}
-        
-        for i, line in enumerate(lines):
-            line = line.strip()
-            
-            # ვეძებთ "Состав" ან "Заявлены" სექციას
-            if 'Состав' in line or 'Заявлены' in line or 'Игрок' in line:
-                in_players_section = True
-                continue
-            
-            # თუ მოთამაშეების სექციაში ვართ
-            if in_players_section and line:
-                # ვცადოთ ამოვიღოთ ნომერი
-                number_match = re.match(r'^(\d+)\s*$', line)
-                if number_match:
-                    # წინა მოთამაშე თუ არის, შევინახოთ
-                    if current_player and 'name' in current_player:
-                        team_data["players"].append(current_player)
-                    
-                    current_player = {
-                        "shirt_number": int(number_match.group(1)),
-                        "name": "",
-                        "position": "",
-                        "birth_date": "",
-                        "height_cm": None,
-                        "weight_kg": None,
-                        "nationality": ""
-                    }
-                    continue
-                
-                # ვეძებთ მოთამაშის სახელს
-                if current_player and not current_player["name"]:
-                    # სახელი ჩვეულებრივ არის ხანგრძლივი ტექსტი
-                    if len(line) > 5 and not re.match(r'^\d+$', line):
-                        # ვამოწმებთ რომ ეს არის სახელი და არა სხვა ინფორმაცია
-                        if any(keyword in line.lower() for keyword in ['вратарь', 'защитник', 'полузащитник', 'нападающий']):
-                            # ეს არის ამპლუა
-                            current_player["position"] = line
-                        elif re.match(r'\d{2}\.\d{2}\.\d{4}', line):
-                            # ეს არის დაბადების თარიღი
-                            current_player["birth_date"] = line
-                        elif re.match(r'^\d{3}$', line):
-                            # ეს არის სიმაღლე
-                            current_player["height_cm"] = int(line)
-                        elif re.match(r'^\d{2,3}$', line):
-                            # ეს არის წონა
-                            current_player["weight_kg"] = int(line)
-                        else:
-                            # ეს არის სახელი
-                            current_player["name"] = line
-                            print(f"[DEBUG] მოთამაშე: {current_player['name']}")
-        
-        # ბოლო მოთამაშე
-        if current_player and 'name' in current_player:
-            team_data["players"].append(current_player)
-        
-        print(f"[DEBUG] ვიპოვე {len(team_data['players'])} მოთამაშე")
         
         return {
             "success": True,
@@ -381,7 +510,7 @@ class TextParser:
         }
 
 # ============================================
-# Controller Bot - ვალიდაცია მხოლოდ, ჩაწერა არა
+# Controller Bot
 # ============================================
 class ControllerBot:
     def __init__(self):
@@ -392,84 +521,58 @@ class ControllerBot:
             self.supabase: Client = create_client(self.supabase_url, self.supabase_key)
         else:
             self.supabase = None
-        
-        self.VALIDATION_RULES = {
-            "name": {
-                "required": True,
-                "min_length": 2,
-                "max_length": 100
-            },
-            "short_code": {
-                "required": True,
-                "pattern": r"^[A-ZА-Я]{3,5}$",
-                "error_message": "short_code უნდა იყოს 3-5 დიდი ასო"
-            }
-        }
-    
-    def validate_field(self, field: str, value: any) -> Tuple[bool, str]:
-        rules = self.VALIDATION_RULES.get(field, {})
-        
-        if rules.get("required") and (value is None or value == ""):
-            return False, f"{field} აუცილებელია"
-        
-        if not value:
-            return True, ""
-        
-        if "min_length" in rules:
-            if len(str(value)) < rules["min_length"]:
-                return False, f"{field} ძალიან მოკლეა (მინიმუმ {rules['min_length']} სიმბოლო)"
-        
-        if "max_length" in rules:
-            if len(str(value)) > rules["max_length"]:
-                return False, f"{field} ძალიან გრძელია (მაქსიმუმ {rules['max_length']} სიმბოლო)"
-        
-        if "pattern" in rules:
-            if not re.match(rules["pattern"], str(value)):
-                return False, rules.get("error_message", f"{field} არასწორი ფორმატია")
-        
-        return True, ""
     
     def validate_team(self, team_data: Dict) -> Tuple[bool, List[str]]:
         errors = []
         
-        for field, value in team_data.items():
-            if field == "players":
-                continue
-            is_valid, error_msg = self.validate_field(field, value)
-            if not is_valid:
-                errors.append(error_msg)
+        if not team_data.get("name"):
+            errors.append("სახელი აუცილებელია")
+        
+        if not team_data.get("short_code"):
+            errors.append("მოკლე კოდი აუცილებელია")
         
         return len(errors) == 0, errors
-    
-    async def check_duplicate(self, team_data: Dict) -> Tuple[bool, str]:
-        if not self.supabase:
-            return False, "Supabase არ არის დაკონფიგურირებული"
-        
-        try:
-            response = self.supabase.table("teams").select("id").eq("name", team_data["name"]).execute()
-            
-            if response.data and len(response.data) > 0:
-                return True, f"გუნდი '{team_data['name']}' უკვე არსებობს ბაზაში"
-            
-            return False, ""
-        except Exception as e:
-            return False, f"შეცდომა duplicate check-ისას: {str(e)}"
+
+# ============================================
+# API Vault Instance
+# ============================================
+api_vault = APIVault()
 
 # ============================================
 # API Endpoints
 # ============================================
-class TeamSchema(BaseModel):
-    name: str
-    short_code: str
-    city: str
-    country: str
-    stadium: str
-    coach: str
-    logo_url: str
-
 @app.get("/")
 async def root():
     return {"message": "FootStats API is running!"}
+
+@app.post("/api/vault/set-key")
+async def set_api_key(request: dict):
+    """აყენებს API გასაღებს"""
+    provider = request.get("provider")
+    api_key = request.get("api_key")
+    
+    if not provider or not api_key:
+        return {"success": False, "error": "provider და api_key აუცილებელია"}
+    
+    api_vault.set_api_key(provider, api_key)
+    return {"success": True, "message": f"{provider} გასაღები დაყენებულია"}
+
+@app.post("/api/vault/initialize")
+async def initialize_provider(request: dict):
+    """ინიციალიზაცია პროვაიდერს"""
+    provider = request.get("provider")
+    
+    if not provider:
+        return {"success": False, "error": "provider აუცილებელია"}
+    
+    success, message = await api_vault.initialize_provider(provider)
+    
+    return {
+        "success": success,
+        "message": message,
+        "models": api_vault.providers[provider]["available_models"],
+        "selected_model": api_vault.providers[provider]["selected_model"]
+    }
 
 @app.get("/admin/scout", response_class=HTMLResponse)
 async def get_dashboard():
@@ -529,6 +632,68 @@ async def get_dashboard():
                 <p class="text-gray-400">ავტომატიზებული საფეხბურთო სტატისტიკის სისტემა</p>
             </div>
 
+            <!-- API Vault Section -->
+            <div class="bg-[#0E1424] border-2 border-yellow-600 rounded-xl p-6 mb-8">
+                <h3 class="text-lg font-bold text-yellow-400 mb-4">🔐 API გასაღებების საცავი</h3>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <!-- Google Gemini -->
+                    <div class="bg-[#070A13] border border-gray-700 rounded-lg p-4">
+                        <div class="flex items-center gap-2 mb-2">
+                            <span class="text-2xl">🔵</span>
+                            <h4 class="font-bold text-white">Google Gemini</h4>
+                            <span id="google-status" class="ml-auto px-2 py-1 bg-gray-700 rounded text-xs">⏸️ არ არის დაყენებული</span>
+                        </div>
+                        <input 
+                            id="google-key" 
+                            type="password" 
+                            placeholder="Google API გასაღები"
+                            class="w-full bg-[#0B0F19] border border-gray-700 rounded p-2 text-sm text-emerald-400 mb-2"
+                        >
+                        <button 
+                            onclick="setKey('google')" 
+                            class="w-full bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded text-sm font-semibold"
+                        >
+                            💾 გასაღების შენახვა
+                        </button>
+                        <button 
+                            onclick="initializeProvider('google')" 
+                            class="w-full mt-2 bg-blue-800 hover:bg-blue-700 text-white px-4 py-2 rounded text-sm font-semibold"
+                        >
+                            🚀 ინიციალიზაცია და მოდელის არჩევა
+                        </button>
+                        <div id="google-models" class="mt-2 text-xs text-gray-400"></div>
+                    </div>
+
+                    <!-- Groq -->
+                    <div class="bg-[#070A13] border border-gray-700 rounded-lg p-4">
+                        <div class="flex items-center gap-2 mb-2">
+                            <span class="text-2xl">🟠</span>
+                            <h4 class="font-bold text-white">Groq</h4>
+                            <span id="groq-status" class="ml-auto px-2 py-1 bg-gray-700 rounded text-xs">⏸️ არ არის დაყენებული</span>
+                        </div>
+                        <input 
+                            id="groq-key" 
+                            type="password" 
+                            placeholder="Groq API გასაღები"
+                            class="w-full bg-[#0B0F19] border border-gray-700 rounded p-2 text-sm text-emerald-400 mb-2"
+                        >
+                        <button 
+                            onclick="setKey('groq')" 
+                            class="w-full bg-orange-600 hover:bg-orange-500 text-white px-4 py-2 rounded text-sm font-semibold"
+                        >
+                            💾 გასაღების შენახვა
+                        </button>
+                        <button 
+                            onclick="initializeProvider('groq')" 
+                            class="w-full mt-2 bg-orange-800 hover:bg-orange-700 text-white px-4 py-2 rounded text-sm font-semibold"
+                        >
+                            🚀 ინიციალიზაცია და მოდელის არჩევა
+                        </button>
+                        <div id="groq-models" class="mt-2 text-xs text-gray-400"></div>
+                    </div>
+                </div>
+            </div>
+
             <!-- Agent Cards -->
             <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
                 <div id="scout-card" class="bg-[#0E1424] border-2 border-gray-800 rounded-xl p-6 transition-all">
@@ -544,13 +709,7 @@ async def get_dashboard():
                             ⏸️ მზად
                         </div>
                     </div>
-                    <p class="text-sm text-gray-400 mb-3">აგროვებს გუნდის ინფორმაციას სპორტული საიტებიდან</p>
-                    <div class="space-y-2 text-xs">
-                        <div class="flex justify-between">
-                            <span class="text-gray-500">სტატუსი:</span>
-                            <span id="scout-task" class="text-emerald-400">მოლოდინში</span>
-                        </div>
-                    </div>
+                    <p class="text-sm text-gray-400 mb-3">აგროვებს გუნდის ინფორმაციას</p>
                 </div>
 
                 <div id="parser-card" class="bg-[#0E1424] border-2 border-gray-800 rounded-xl p-6 transition-all">
@@ -567,12 +726,6 @@ async def get_dashboard():
                         </div>
                     </div>
                     <p class="text-sm text-gray-400 mb-3">ამუშავებს ჩაფეისთებულ ტექსტს</p>
-                    <div class="space-y-2 text-xs">
-                        <div class="flex justify-between">
-                            <span class="text-gray-500">სტატუსი:</span>
-                            <span id="parser-task" class="text-purple-400">მოლოდინში</span>
-                        </div>
-                    </div>
                 </div>
 
                 <div id="controller-card" class="bg-[#0E1424] border-2 border-gray-800 rounded-xl p-6 transition-all">
@@ -588,13 +741,7 @@ async def get_dashboard():
                             ⏸️ მზად
                         </div>
                     </div>
-                    <p class="text-sm text-gray-400 mb-3">ამოწმებს მონაცემების სისწორეს</p>
-                    <div class="space-y-2 text-xs">
-                        <div class="flex justify-between">
-                            <span class="text-gray-500">შემოწმებული:</span>
-                            <span id="controller-checked" class="text-gray-400">0 გუნდი</span>
-                        </div>
-                    </div>
+                    <p class="text-sm text-gray-400 mb-3">ამოწმებს მონაცემებს</p>
                 </div>
             </div>
 
@@ -616,7 +763,7 @@ async def get_dashboard():
                         id="targetUrl" 
                         type="text" 
                         value="https://www.championat.com/football/_england/tournament/6592/teams/268572/"
-                        placeholder="ჩაწერე გუნდის URL championat.com-დან" 
+                        placeholder="ჩაწერე გუნდის URL" 
                         class="flex-1 bg-[#070A13] border border-gray-700 rounded-lg p-3 text-emerald-400 font-mono text-sm focus:outline-none focus:border-emerald-500"
                     >
                     <button 
@@ -656,7 +803,7 @@ async def get_dashboard():
                             <div class="w-8 h-8 bg-gray-700 rounded-full flex items-center justify-center text-sm font-bold">1</div>
                             <div class="flex-1">
                                 <div class="font-semibold text-white">მონაცემების მოპოვება</div>
-                                <div class="text-xs text-gray-400">აგენტი აგროვებს ინფორმაციას</div>
+                                <div class="text-xs text-gray-400">TeamScout აგროვებს ინფორმაციას</div>
                             </div>
                             <div id="step-1-status" class="text-gray-500">⏸️</div>
                         </div>
@@ -666,7 +813,7 @@ async def get_dashboard():
                             <div class="w-8 h-8 bg-gray-700 rounded-full flex items-center justify-center text-sm font-bold">2</div>
                             <div class="flex-1">
                                 <div class="font-semibold text-white">ვალიდაცია</div>
-                                <div class="text-xs text-gray-400">Controller ამოწმებს მონაცემების სისწორეს</div>
+                                <div class="text-xs text-gray-400">Controller ამოწმებს მონაცემებს</div>
                             </div>
                             <div id="step-2-status" class="text-gray-500">⏸️</div>
                         </div>
@@ -689,20 +836,12 @@ async def get_dashboard():
                 <h3 class="text-lg font-bold text-white mb-4">📊 მოპოვებული მონაცემები</h3>
                 <div id="team-data" class="grid grid-cols-1 md:grid-cols-2 gap-4">
                 </div>
-                
-                <!-- Players Section -->
-                <div id="players-section" class="hidden mt-6">
-                    <h4 class="text-md font-bold text-white mb-3">👥 მოთამაშეები (<span id="players-count">0</span>)</h4>
-                    <div id="players-list" class="bg-[#070A13] border border-gray-700 rounded-lg p-4 max-h-96 overflow-y-auto">
-                    </div>
-                </div>
-                
                 <div class="flex gap-3 mt-6">
                     <button 
                         onclick="confirmData()" 
                         class="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-3 rounded-lg font-semibold transition-all"
                     >
-                        ✅ დადასტურება და ბაზაში ჩაწერა
+                        ✅ დადასტურება
                     </button>
                     <button 
                         onclick="rejectData()" 
@@ -719,25 +858,88 @@ async def get_dashboard():
                     <h3 class="text-lg font-bold text-white">📜 ლაივ ლოგები</h3>
                     <button onclick="clearLogs()" class="text-xs text-gray-400 hover:text-white">გასუფთავება</button>
                 </div>
-                <div id="terminal" class="bg-[#070A13] border border-gray-850 rounded-lg p-4 h-80 overflow-y-auto font-mono text-xs space-y-2">
-                    <div class="text-gray-500">// სისტემა მზად არის. დაელოდე ბრძანებას...</div>
+                <div id="terminal" class="bg-[#070A13] border border-gray-850 rounded-lg p-4 h-96 overflow-y-auto font-mono text-xs space-y-2">
+                    <div class="text-gray-500">// სისტემა მზად არის...</div>
                 </div>
             </div>
         </div>
 
         <script>
-            let checkedCount = 0;
             let currentTeamData = null;
             let currentMode = 'url';
 
             function switchTab(mode) {
                 currentMode = mode;
-                
                 document.getElementById('tab-url').className = mode === 'url' ? 'tab-active px-6 py-3 rounded-lg font-semibold transition-all' : 'tab-inactive px-6 py-3 rounded-lg font-semibold transition-all';
                 document.getElementById('tab-paste').className = mode === 'paste' ? 'tab-active px-6 py-3 rounded-lg font-semibold transition-all' : 'tab-inactive px-6 py-3 rounded-lg font-semibold transition-all';
-                
                 document.getElementById('section-url').classList.toggle('hidden', mode !== 'url');
                 document.getElementById('section-paste').classList.toggle('hidden', mode !== 'paste');
+            }
+
+            async function setKey(provider) {
+                const keyInput = document.getElementById(`${provider}-key`);
+                const apiKey = keyInput.value;
+                
+                if (!apiKey) {
+                    alert('გთხოვთ ჩაწეროთ API გასაღები');
+                    return;
+                }
+
+                addLog('APIVault', `💾 ${provider} გასაღების შენახვა...`, 'info');
+
+                try {
+                    const response = await fetch('/api/vault/set-key', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ provider, api_key: apiKey })
+                    });
+
+                    const data = await response.json();
+                    
+                    if (data.success) {
+                        addLog('APIVault', `✅ ${provider} გასაღები შენახულია`, 'success');
+                        document.getElementById(`${provider}-status`).innerHTML = '✅ გასაღები შენახულია';
+                        document.getElementById(`${provider}-status`).className = 'ml-auto px-2 py-1 bg-emerald-600 rounded text-xs';
+                    } else {
+                        addLog('APIVault', `❌ ${data.error}`, 'error');
+                    }
+                } catch (error) {
+                    addLog('APIVault', `❌ შეცდომა: ${error.message}`, 'error');
+                }
+            }
+
+            async function initializeProvider(provider) {
+                addLog('APIVault', `🚀 ${provider} ინიციალიზაცია იწყება...`, 'info');
+                addLog('APIVault', `🔍 მოდელების სია გამოითხოვა...`, 'info');
+
+                try {
+                    const response = await fetch('/api/vault/initialize', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ provider })
+                    });
+
+                    const data = await response.json();
+                    
+                    if (data.success) {
+                        addLog('APIVault', `✅ ${data.message}`, 'success');
+                        addLog('APIVault', `📋 ხელმისაწვდომი მოდელები: ${data.models.join(', ')}`, 'info');
+                        addLog('APIVault', `🎯 არჩეული მოდელი: ${data.selected_model}`, 'success');
+                        
+                        document.getElementById(`${provider}-status`).innerHTML = '✅ მზად';
+                        document.getElementById(`${provider}-status`).className = 'ml-auto px-2 py-1 bg-emerald-600 rounded text-xs';
+                        document.getElementById(`${provider}-models`).innerHTML = `
+                            <div class="text-emerald-400">✓ ${data.models.length} მოდელი</div>
+                            <div class="text-yellow-400">🎯 ${data.selected_model}</div>
+                        `;
+                    } else {
+                        addLog('APIVault', `❌ ${data.message}`, 'error');
+                        document.getElementById(`${provider}-status`).innerHTML = '❌ შეცდომა';
+                        document.getElementById(`${provider}-status`).className = 'ml-auto px-2 py-1 bg-red-600 rounded text-xs';
+                    }
+                } catch (error) {
+                    addLog('APIVault', `❌ შეცდომა: ${error.message}`, 'error');
+                }
             }
 
             function startScouting() {
@@ -796,9 +998,7 @@ async def get_dashboard():
                 
                 fetch('/api/agent/parse-text', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ text: text })
                 })
                 .then(response => response.json())
@@ -806,7 +1006,7 @@ async def get_dashboard():
                     if (data.success) {
                         currentTeamData = data.data;
                         displayTeamData(data.data);
-                        addLog('TextParser', `✅ წარმატებით დამუშავდა. ვიპოვე ${data.players_count} მოთამაშე`, 'success');
+                        addLog('TextParser', `✅ წარმატებით დამუშავდა`, 'success');
                     } else {
                         addLog('TextParser', `❌ შეცდომა: ${data.error}`, 'error');
                     }
@@ -830,11 +1030,10 @@ async def get_dashboard():
                 const fields = [
                     { label: '🏆 გუნდის სახელი', value: teamData.name, key: 'name' },
                     { label: '🔤 მოკლე კოდი', value: teamData.short_code, key: 'short_code' },
-                    { label: '🏟️ სტადიონი', value: teamData.stadium || 'არ არის მითითებული', key: 'stadium' },
-                    { label: '🏙️ ქალაქი', value: teamData.city || 'არ არის მითითებული', key: 'city' },
-                    { label: '🌍 ქვეყანა', value: teamData.country || 'არ არის მითითებული', key: 'country' },
-                    { label: '👔 მწვრთნელი', value: teamData.coach || 'არ არის მითითებული', key: 'coach' },
-                    { label: '🖼️ ლოგო', value: teamData.logo_url ? 'მოიძებნა' : 'არ მოიძებნა', key: 'logo_url' }
+                    { label: '🏟️ სტადიონი', value: teamData.stadium || '', key: 'stadium' },
+                    { label: '🏙️ ქალაქი', value: teamData.city || '', key: 'city' },
+                    { label: '🌍 ქვეყანა', value: teamData.country || '', key: 'country' },
+                    { label: '👔 მწვრთნელი', value: teamData.coach || '', key: 'coach' }
                 ];
                 
                 teamDataDiv.innerHTML = fields.map(field => `
@@ -848,46 +1047,10 @@ async def get_dashboard():
                         >
                     </div>
                 `).join('');
-                
-                // Players
-                if (teamData.players && teamData.players.length > 0) {
-                    document.getElementById('players-section').classList.remove('hidden');
-                    document.getElementById('players-count').textContent = teamData.players.length;
-                    
-                    const playersList = document.getElementById('players-list');
-                    playersList.innerHTML = teamData.players.map(player => `
-                        <div class="border-b border-gray-700 py-2 last:border-b-0">
-                            <div class="flex justify-between items-center">
-                                <div>
-                                    <span class="text-emerald-400 font-bold">#${player.shirt_number || '?'}</span>
-                                    <span class="text-white ml-2">${player.name || 'უცნობი'}</span>
-                                </div>
-                                <div class="text-xs text-gray-400">
-                                    ${player.position || ''}
-                                </div>
-                            </div>
-                            <div class="text-xs text-gray-500 mt-1">
-                                ${player.birth_date ? '🎂 ' + player.birth_date : ''}
-                                ${player.height_cm ? ' | 📏 ' + player.height_cm + ' სმ' : ''}
-                                ${player.weight_kg ? ' | ⚖️ ' + player.weight_kg + ' კგ' : ''}
-                            </div>
-                        </div>
-                    `).join('');
-                } else {
-                    document.getElementById('players-section').classList.add('hidden');
-                }
             }
 
             function confirmData() {
-                const inputs = document.querySelectorAll('#team-data input');
-                const updatedData = {};
-                inputs.forEach(input => {
-                    updatedData[input.dataset.key] = input.value;
-                });
-                
-                addLog('system', '✅ მონაცემები დადასტურდა. ბაზაში ჩაწერა იწყება...', 'success');
-                alert('მონაცემები დადასტურდა! (ბაზაში ჩაწერა მოგვიანებით დაემატება)');
-                
+                addLog('system', '✅ მონაცემები დადასტურდა', 'success');
                 document.getElementById('data-display').classList.add('hidden');
             }
 
@@ -906,20 +1069,10 @@ async def get_dashboard():
                     step.className = 'step-pending bg-[#070A13] rounded-lg p-4 transition-all';
                     document.getElementById(`step-${i}-status`).textContent = '⏸️';
                 }
-
-                document.getElementById('scout-card').classList.remove('agent-active');
-                document.getElementById('parser-card').classList.remove('agent-active');
-                document.getElementById('controller-card').classList.remove('agent-active');
-                document.getElementById('scout-status').innerHTML = '⏸️ მზად';
-                document.getElementById('scout-status').className = 'px-3 py-1 bg-gray-700 rounded-full text-xs font-semibold';
-                document.getElementById('parser-status').innerHTML = '⏸️ მზად';
-                document.getElementById('parser-status').className = 'px-3 py-1 bg-gray-700 rounded-full text-xs font-semibold';
-                document.getElementById('controller-status').innerHTML = '⏸️ მზად';
-                document.getElementById('controller-status').className = 'px-3 py-1 bg-gray-700 rounded-full text-xs font-semibold';
             }
 
             function handleAgentMessage(data) {
-                const { agent, message, step, status, team_name } = data;
+                const { agent, message, step, status } = data;
 
                 const logType = message.includes('❌') ? 'error' : 
                                message.includes('✅') ? 'success' : 
@@ -928,18 +1081,8 @@ async def get_dashboard():
 
                 if (agent === 'TeamScout') {
                     document.getElementById('scout-card').classList.add('agent-active');
-                    document.getElementById('scout-status').innerHTML = '🔄 მუშაობს';
-                    document.getElementById('scout-status').className = 'px-3 py-1 bg-emerald-600 rounded-full text-xs font-semibold animate-pulse';
-                    document.getElementById('scout-task').textContent = message.substring(0, 30) + '...';
-                } else if (agent === 'TextParser') {
-                    document.getElementById('parser-card').classList.add('agent-active');
-                    document.getElementById('parser-status').innerHTML = '🔄 მუშაობს';
-                    document.getElementById('parser-status').className = 'px-3 py-1 bg-purple-600 rounded-full text-xs font-semibold animate-pulse';
-                    document.getElementById('parser-task').textContent = message.substring(0, 30) + '...';
                 } else if (agent === 'Controller') {
                     document.getElementById('controller-card').classList.add('agent-active');
-                    document.getElementById('controller-status').innerHTML = '🔄 მუშაობს';
-                    document.getElementById('controller-status').className = 'px-3 py-1 bg-blue-600 rounded-full text-xs font-semibold animate-pulse';
                 }
 
                 if (step) {
@@ -948,17 +1091,7 @@ async def get_dashboard():
 
                 if (data.done) {
                     document.getElementById('scout-card').classList.remove('agent-active');
-                    document.getElementById('parser-card').classList.remove('agent-active');
                     document.getElementById('controller-card').classList.remove('agent-active');
-                    document.getElementById('scout-status').innerHTML = '✅ დასრულდა';
-                    document.getElementById('scout-status').className = 'px-3 py-1 bg-emerald-600 rounded-full text-xs font-semibold';
-                    document.getElementById('parser-status').innerHTML = '✅ დასრულდა';
-                    document.getElementById('parser-status').className = 'px-3 py-1 bg-purple-600 rounded-full text-xs font-semibold';
-                    document.getElementById('controller-status').innerHTML = '✅ დასრულდა';
-                    document.getElementById('controller-status').className = 'px-3 py-1 bg-blue-600 rounded-full text-xs font-semibold';
-                    
-                    checkedCount++;
-                    document.getElementById('controller-checked').textContent = `${checkedCount} გუნდი`;
                 }
             }
 
@@ -995,6 +1128,7 @@ async def get_dashboard():
                     'TeamScout': 'text-emerald-400',
                     'TextParser': 'text-purple-400',
                     'Controller': 'text-blue-400',
+                    'APIVault': 'text-yellow-400',
                     'system': 'text-gray-500'
                 };
 
@@ -1021,7 +1155,6 @@ async def get_dashboard():
 
 @app.post("/api/agent/parse-text")
 async def parse_text(request: dict):
-    """ამუშავებს მომხმარებლის მიერ ჩაფეისთებულ ტექსტს"""
     text = request.get("text", "")
     
     if not text.strip():
@@ -1034,7 +1167,7 @@ async def parse_text(request: dict):
 
 @app.get("/api/agent/stream-scout")
 async def stream_scout(url: str):
-    scout = TeamScout()
+    scout = TeamScout(api_vault)
     controller = ControllerBot()
     
     async def agent_runner():
@@ -1048,113 +1181,120 @@ async def stream_scout(url: str):
         
         yield "data: " + json.dumps({
             "agent": "TeamScout", 
-            "message": f"📡 ვუკავშირდები: {url}",
+            "message": f"📡 URL: {url}",
             "step": 1,
             "status": "active"
         }) + "\n\n"
         
-        result = await scout.scout_team(url)
-        
-        if not result["success"]:
-            yield "data: " + json.dumps({
-                "agent": "TeamScout", 
-                "message": f"❌ შეცდომა: {result['error']}",
-                "step": 1,
-                "status": "error",
-                "done": True
-            }) + "\n\n"
-            return
-        
-        team_data = result["data"]
-        
+        # STEP 1: პირდაპირი გადმოწერა
         yield "data: " + json.dumps({
             "agent": "TeamScout", 
-            "message": f"✅ გვერდი წარმატებით ჩაიტვირთა ({result.get('raw_html_length', 0)} bytes)",
+            "message": "🌐 მცდელობა 1: პირდაპირი გადმოწერა...",
             "step": 1,
-            "status": "completed"
+            "status": "active"
         }) + "\n\n"
         await asyncio.sleep(0.5)
         
-        yield "data: " + json.dumps({
-            "agent": "TeamScout", 
-            "message": f"🏆 გუნდი: {team_data['name'] or 'არ მოიძებნა'}",
-            "team_name": team_data['name'],
-            "step": 1,
-            "status": "completed"
-        }) + "\n\n"
+        html = await scout.fetch_page_direct(scout.normalize_url(url))
         
-        yield "data: " + json.dumps({
-            "agent": "TeamScout", 
-            "message": f"🔤 მოკლე კოდი: {team_data['short_code'] or 'არ მოიძებნა'}",
-            "step": 1,
-            "status": "completed"
-        }) + "\n\n"
+        if html:
+            yield "data: " + json.dumps({
+                "agent": "TeamScout", 
+                "message": f"✅ პირდაპირი გადმოწერა წარმატებით! ({len(html)} bytes)",
+                "step": 1,
+                "status": "completed"
+            }) + "\n\n"
+            
+            team_data = scout.parse_team_info(html, url)
+            
+            yield "data: " + json.dumps({
+                "agent": "TeamScout", 
+                "message": f"🏆 გუნდი: {team_data['name'] or 'არ მოიძებნა'}",
+                "step": 1,
+                "status": "completed"
+            }) + "\n\n"
+        else:
+            yield "data: " + json.dumps({
+                "agent": "TeamScout", 
+                "message": "❌ პირდაპირი გადმოწერა წარუმატებელია",
+                "step": 1,
+                "status": "error"
+            }) + "\n\n"
+            
+            # STEP 2: Google Gemini
+            yield "data: " + json.dumps({
+                "agent": "TeamScout", 
+                "message": "🔵 მცდელობა 2: Google Gemini...",
+                "step": 1,
+                "status": "active"
+            }) + "\n\n"
+            await asyncio.sleep(0.5)
+            
+            ai_text, ai_msg = await scout.fetch_with_google(url)
+            
+            if ai_text:
+                yield "data: " + json.dumps({
+                    "agent": "TeamScout", 
+                    "message": f"✅ Google წარმატება! მოდელი: {api_vault.providers['google']['selected_model']}",
+                    "step": 1,
+                    "status": "completed"
+                }) + "\n\n"
+                
+                team_data = scout.parse_ai_response(ai_text)
+            else:
+                yield "data: " + json.dumps({
+                    "agent": "TeamScout", 
+                    "message": f"❌ Google წარუმატებელი: {ai_msg}",
+                    "step": 1,
+                    "status": "error"
+                }) + "\n\n"
+                
+                # STEP 3: Groq
+                yield "data: " + json.dumps({
+                    "agent": "TeamScout", 
+                    "message": "🟠 მცდელობა 3: Groq...",
+                    "step": 1,
+                    "status": "active"
+                }) + "\n\n"
+                await asyncio.sleep(0.5)
+                
+                ai_text, ai_msg = await scout.fetch_with_groq(url)
+                
+                if ai_text:
+                    yield "data: " + json.dumps({
+                        "agent": "TeamScout", 
+                        "message": f"✅ Groq წარმატება! მოდელი: {api_vault.providers['groq']['selected_model']}",
+                        "step": 1,
+                        "status": "completed"
+                    }) + "\n\n"
+                    
+                    team_data = scout.parse_ai_response(ai_text)
+                else:
+                    yield "data: " + json.dumps({
+                        "agent": "TeamScout", 
+                        "message": f"❌ ყველა მეთოდი წარუმატებელია",
+                        "step": 1,
+                        "status": "error",
+                        "done": True
+                    }) + "\n\n"
+                    return
         
-        yield "data: " + json.dumps({
-            "agent": "TeamScout", 
-            "message": f"🏟️ სტადიონი: {team_data['stadium'] or 'არ არის მითითებული'}",
-            "step": 1,
-            "status": "completed"
-        }) + "\n\n"
-        
-        yield "data: " + json.dumps({
-            "agent": "TeamScout", 
-            "message": f"🏙️ ქალაქი: {team_data['city'] or 'არ არის მითითებული'}",
-            "step": 1,
-            "status": "completed"
-        }) + "\n\n"
-        
-        yield "data: " + json.dumps({
-            "agent": "TeamScout", 
-            "message": f"🌍 ქვეყანა: {team_data['country'] or 'არ არის მითითებული'}",
-            "step": 1,
-            "status": "completed"
-        }) + "\n\n"
-        
-        yield "data: " + json.dumps({
-            "agent": "TeamScout", 
-            "message": f"👔 მწვრთნელი: {team_data['coach'] or 'არ არის მითითებული'}",
-            "step": 1,
-            "status": "completed"
-        }) + "\n\n"
-        
-        yield "data: " + json.dumps({
-            "agent": "TeamScout", 
-            "message": f"🖼️ ლოგო: {'მოიძებნა' if team_data['logo_url'] else 'არ მოიძებნა'}",
-            "step": 1,
-            "status": "completed"
-        }) + "\n\n"
-        
-        await asyncio.sleep(1)
-        
+        # STEP 2: Controller
         yield "data: " + json.dumps({
             "agent": "Controller", 
-            "message": "🔍 ვიწყებ მონაცემების შემოწმებას...",
+            "message": "🔍 ვიწყებ ვალიდაციას...",
             "step": 2,
             "status": "active"
         }) + "\n\n"
         await asyncio.sleep(1)
         
-        is_valid, validation_errors = controller.validate_team(team_data)
+        is_valid, errors = controller.validate_team(team_data)
         
         if not is_valid:
             yield "data: " + json.dumps({
                 "agent": "Controller", 
-                "message": f"❌ ვალიდაცია ვერ გაიარა:",
+                "message": f"❌ ვალიდაცია ვერ გაიარა: {', '.join(errors)}",
                 "step": 2,
-                "status": "error"
-            }) + "\n\n"
-            for error in validation_errors:
-                yield "data: " + json.dumps({
-                    "agent": "Controller", 
-                    "message": f"   ⚠️ {error}",
-                    "step": 2,
-                    "status": "error"
-                }) + "\n\n"
-            yield "data: " + json.dumps({
-                "agent": "Controller", 
-                "message": f"🚫 მონაცემები არ გადის ვალიდაციას",
-                "step": 3,
                 "status": "error",
                 "done": True
             }) + "\n\n"
@@ -1162,15 +1302,15 @@ async def stream_scout(url: str):
         
         yield "data: " + json.dumps({
             "agent": "Controller", 
-            "message": f"✅ ვალიდაცია წარმატებით გაიარა",
+            "message": "✅ ვალიდაცია წარმატებით გაიარა",
             "step": 2,
             "status": "completed"
         }) + "\n\n"
-        await asyncio.sleep(0.5)
         
+        # STEP 3: ვიზუალიზაცია
         yield "data: " + json.dumps({
             "agent": "Controller", 
-            "message": f"📊 მონაცემები მზად არის შესამოწმებლად",
+            "message": "📊 მონაცემები მზად არის",
             "step": 3,
             "status": "completed",
             "done": True,
