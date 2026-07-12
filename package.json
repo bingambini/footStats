@@ -1,0 +1,13 @@
+{
+  "name": "football-analytics",
+  "version": "1.0.0",
+  "description": "Football Analytics and Betting Value Predictive Engine",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.43.0"
+  }
+}
