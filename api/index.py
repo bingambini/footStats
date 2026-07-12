@@ -8,27 +8,33 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 import httpx
 from bs4 import BeautifulSoup
-from supabase import create_client, Client
 
 app = FastAPI()
 
 # ============================================
-# Supabase Client
+# Supabase Client (Lazy Loading)
 # ============================================
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+_supabase_client = None
 
 def get_supabase():
-    if SUPABASE_URL and SUPABASE_KEY:
-        return create_client(SUPABASE_URL, SUPABASE_KEY)
-    return None
+    global _supabase_client
+    if _supabase_client is None:
+        try:
+            from supabase import create_client
+            SUPABASE_URL = os.environ.get("SUPABASE_URL")
+            SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+            if SUPABASE_URL and SUPABASE_KEY:
+                _supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        except Exception as e:
+            print(f"[Supabase] ინიციალიზაციის შეცდომა: {e}")
+            _supabase_client = None
+    return _supabase_client
 
 # ============================================
-# API Vault - Supabase-ში შენახვით
+# API Vault - გამარტივებული ვერსია
 # ============================================
 class APIVault:
     def __init__(self):
-        self.supabase = get_supabase()
         self.providers_cache = {
             "google": {
                 "name": "Google Gemini",
@@ -45,33 +51,33 @@ class APIVault:
                 "selected_model": None
             }
         }
-        # ჩავტვირთოთ გასაღებები Supabase-დან
-        asyncio.create_task(self.load_from_db())
     
-    async def load_from_db(self):
+    def load_from_db(self):
         """ჩავტვირთოთ გასაღებები Supabase-დან"""
-        if not self.supabase:
-            print("[APIVault] Supabase არ არის დაკონფიგურირებული")
-            return
-        
         try:
-            response = self.supabase.table("api_keys").select("*").execute()
+            supabase = get_supabase()
+            if not supabase:
+                print("[APIVault] Supabase არ არის")
+                return
+            
+            response = supabase.table("api_keys").select("*").execute()
             for row in response.data:
                 provider = row["provider"]
                 if provider in self.providers_cache:
                     self.providers_cache[provider]["api_key"] = row["api_key"]
                     self.providers_cache[provider]["selected_model"] = row.get("selected_model")
                     self.providers_cache[provider]["available_models"] = row.get("available_models") or []
-                    print(f"[APIVault] {provider} გასაღები ჩაიტვირთა DB-დან")
+                    print(f"[APIVault] {provider} ჩაიტვირთა DB-დან")
         except Exception as e:
             print(f"[APIVault] DB ჩატვირთვის შეცდომა: {e}")
     
-    async def save_to_db(self, provider: str):
+    def save_to_db(self, provider: str) -> Tuple[bool, str]:
         """შევინახოთ გასაღები Supabase-ში"""
-        if not self.supabase:
-            return False, "Supabase არ არის"
-        
         try:
+            supabase = get_supabase()
+            if not supabase:
+                return False, "Supabase არ არის"
+            
             config = self.providers_cache[provider]
             data = {
                 "provider": provider,
@@ -80,15 +86,12 @@ class APIVault:
                 "available_models": config["available_models"]
             }
             
-            # ვამოწმებთ არსებობს თუ არა
-            existing = self.supabase.table("api_keys").select("id").eq("provider", provider).execute()
+            existing = supabase.table("api_keys").select("id").eq("provider", provider).execute()
             
             if existing.data:
-                # განვაახლოთ
-                self.supabase.table("api_keys").update(data).eq("provider", provider).execute()
+                supabase.table("api_keys").update(data).eq("provider", provider).execute()
             else:
-                # ჩავწეროთ
-                self.supabase.table("api_keys").insert(data).execute()
+                supabase.table("api_keys").insert(data).execute()
             
             print(f"[APIVault] {provider} შენახულია DB-ში")
             return True, "წარმატება"
@@ -103,7 +106,8 @@ class APIVault:
     def get_provider(self, provider: str) -> Dict:
         return self.providers_cache.get(provider, {})
     
-    async def fetch_available_models(self, provider: str) -> List[str]:
+    def fetch_available_models_sync(self, provider: str) -> List[str]:
+        """სინქრონული ვერსია - Vercel-ისთვის უკეთესი"""
         config = self.providers_cache[provider]
         api_key = config["api_key"]
         if not api_key:
@@ -112,26 +116,24 @@ class APIVault:
         try:
             if provider == "google":
                 url = f"{config['base_url']}/models?key={api_key}"
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(url, timeout=10.0)
-                    if response.status_code == 200:
-                        data = response.json()
-                        models = []
-                        for model in data.get("models", []):
-                            name = model.get("name", "")
-                            if "flash" in name.lower() or "pro" in name.lower():
-                                models.append(name.replace("models/", ""))
-                        config["available_models"] = models
-                        return models
+                response = httpx.get(url, timeout=10.0)
+                if response.status_code == 200:
+                    data = response.json()
+                    models = []
+                    for model in data.get("models", []):
+                        name = model.get("name", "")
+                        if "flash" in name.lower() or "pro" in name.lower():
+                            models.append(name.replace("models/", ""))
+                    config["available_models"] = models
+                    return models
             elif provider == "groq":
                 url = f"{config['base_url']}/models"
                 headers = {"Authorization": f"Bearer {api_key}"}
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(url, headers=headers, timeout=10.0)
-                    if response.status_code == 200:
-                        data = response.json()
-                        config["available_models"] = [m["id"] for m in data.get("data", [])]
-                        return config["available_models"]
+                response = httpx.get(url, headers=headers, timeout=10.0)
+                if response.status_code == 200:
+                    data = response.json()
+                    config["available_models"] = [m["id"] for m in data.get("data", [])]
+                    return config["available_models"]
         except Exception as e:
             print(f"[APIVault] {provider} მოდელების შეცდომა: {e}")
         return []
@@ -156,12 +158,12 @@ class APIVault:
         config["selected_model"] = models[0]
         return models[0]
     
-    async def initialize_provider(self, provider: str) -> Tuple[bool, str]:
+    def initialize_provider(self, provider: str) -> Tuple[bool, str]:
         config = self.providers_cache[provider]
         if not config["api_key"]:
             return False, f"{config['name']} გასაღები არ არის"
         
-        models = await self.fetch_available_models(provider)
+        models = self.fetch_available_models_sync(provider)
         if not models:
             return False, "მოდელები ვერ მოიძებნა"
         
@@ -169,12 +171,16 @@ class APIVault:
         if not selected:
             return False, "მოდელი ვერ აირჩია"
         
-        # შევინახოთ DB-ში
-        await self.save_to_db(provider)
-        
+        self.save_to_db(provider)
         return True, f"{config['name']} მზად. მოდელი: {selected}"
 
 api_vault = APIVault()
+
+# ჩავტვირთოთ გასაღებები სერვერის დაწყებისას
+try:
+    api_vault.load_from_db()
+except Exception as e:
+    print(f"[Startup] DB ჩატვირთვის შეცდომა: {e}")
 
 # ============================================
 # TeamScout Bot
@@ -224,7 +230,6 @@ class TeamScout:
             model = config["selected_model"]
             api_url = f"{config['base_url']}/models/{model}:generateContent?key={config['api_key']}"
             
-            # გაუმჯობესებული prompt
             prompt = f"""შეამოწმე ეს საფეხბურთო გუნდის URL და ამოიღე ზუსტი ინფორმაცია:
 URL: {url}
 
@@ -275,7 +280,6 @@ URL: {url}
             api_url = f"{config['base_url']}/chat/completions"
             headers = {"Authorization": f"Bearer {config['api_key']}", "Content-Type": "application/json"}
             
-            # გაუმჯობესებული prompt
             prompt = f"""შეამოწმე ეს საფეხბურთო გუნდის URL და ამოიღე ზუსტი ინფორმაცია:
 URL: {url}
 
@@ -320,7 +324,6 @@ URL: {url}
     def parse_ai_response(self, ai_text: str) -> Dict:
         team_data = {"name": "", "short_code": "", "city": "", "country": "", "stadium": "", "coach": "", "logo_url": ""}
         try:
-            # ვეძებთ JSON-ს ტექსტში
             json_match = re.search(r'\{[^{}]*\}', ai_text, re.DOTALL)
             if json_match:
                 data = json.loads(json_match.group(0))
@@ -379,7 +382,6 @@ async def root():
 
 @app.get("/api/vault/status")
 async def get_vault_status():
-    """მივიღოთ API გასაღებების სტატუსი"""
     status = {}
     for provider in ["google", "groq"]:
         config = api_vault.get_provider(provider)
@@ -397,10 +399,7 @@ async def set_api_key(request: dict):
     if not provider or not api_key:
         return {"success": False, "error": "provider და api_key აუცილებელია"}
     api_vault.set_api_key(provider, api_key)
-    
-    # შევინახოთ DB-ში
-    success, msg = await api_vault.save_to_db(provider)
-    
+    success, msg = api_vault.save_to_db(provider)
     if success:
         return {"success": True, "message": f"{provider} გასაღები შენახულია"}
     else:
@@ -411,7 +410,7 @@ async def initialize_provider(request: dict):
     provider = request.get("provider")
     if not provider:
         return {"success": False, "error": "provider აუცილებელია"}
-    success, message = await api_vault.initialize_provider(provider)
+    success, message = api_vault.initialize_provider(provider)
     config = api_vault.get_provider(provider)
     return {
         "success": success,
@@ -465,7 +464,7 @@ async def get_dashboard():
 
             <!-- API Vault -->
             <div class="bg-[#0E1424] border-2 border-yellow-600 rounded-xl p-6 mb-8">
-                <h3 class="text-lg font-bold text-yellow-400 mb-4">🔐 API გასაღებების საცავი (Supabase-ში ინახება)</h3>
+                <h3 class="text-lg font-bold text-yellow-400 mb-4">🔐 API გასაღებების საცავი</h3>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div class="bg-[#070A13] border border-gray-700 rounded-lg p-4">
                         <div class="flex items-center gap-2 mb-2">
@@ -576,7 +575,6 @@ async def get_dashboard():
         <script>
             let currentTeamData = null;
 
-            // გვერდის ჩატვირთვისას შევამოწმოთ სტატუსი
             window.addEventListener('DOMContentLoaded', async () => {
                 try {
                     const response = await fetch('/api/vault/status');
@@ -815,7 +813,6 @@ async def stream_scout(url: str):
         
         yield "data: " + json.dumps({"agent": "TeamScout", "message": f"📡 URL: {url}", "step": 1, "status": "active"}) + "\n\n"
         
-        # STEP 1: პირდაპირი
         yield "data: " + json.dumps({"agent": "TeamScout", "message": "🌐 მცდელობა 1: პირდაპირი გადმოწერა...", "step": 1, "status": "active"}) + "\n\n"
         yield "data: " + json.dumps({"agent": "TeamScout", "message": "🔧 ვიყენებ: User-Agent, Accept-Language, Sec-Fetch headers", "step": 1, "status": "active"}) + "\n\n"
         yield "data: " + json.dumps({"agent": "TeamScout", "message": "📡 ვაგზავნი GET request-ს...", "step": 1, "status": "active"}) + "\n\n"
@@ -835,7 +832,6 @@ async def stream_scout(url: str):
             yield "data: " + json.dumps({"agent": "TeamScout", "message": f"❌ პირდაპირი წარუმატებელი: {direct_msg}", "step": 1, "status": "error"}) + "\n\n"
             yield "data: " + json.dumps({"agent": "TeamScout", "message": "💡 საიტი ბლოკავს ავტომატიზებულ requests-ს", "step": 1, "status": "error"}) + "\n\n"
             
-            # STEP 2: Google
             google_config = api_vault.get_provider("google")
             yield "data: " + json.dumps({"agent": "TeamScout", "message": "🔵 მცდელობა 2: Google Gemini...", "step": 1, "status": "active"}) + "\n\n"
             yield "data: " + json.dumps({"agent": "TeamScout", "message": f"🤖 მოდელი: {google_config.get('selected_model') or 'არ არის არჩეული'}", "step": 1, "status": "active"}) + "\n\n"
@@ -852,7 +848,6 @@ async def stream_scout(url: str):
             else:
                 yield "data: " + json.dumps({"agent": "TeamScout", "message": f"❌ Google წარუმატებელი: {google_msg}", "step": 1, "status": "error"}) + "\n\n"
                 
-                # STEP 3: Groq
                 groq_config = api_vault.get_provider("groq")
                 yield "data: " + json.dumps({"agent": "TeamScout", "message": "🟠 მცდელობა 3: Groq...", "step": 1, "status": "active"}) + "\n\n"
                 yield "data: " + json.dumps({"agent": "TeamScout", "message": f"🤖 მოდელი: {groq_config.get('selected_model') or 'არ არის არჩეული'}", "step": 1, "status": "active"}) + "\n\n"
@@ -873,7 +868,6 @@ async def stream_scout(url: str):
             yield "data: " + json.dumps({"agent": "TeamScout", "message": "❌ მონაცემები ვერ მოიპოვა", "step": 1, "status": "error", "done": True}) + "\n\n"
             return
         
-        # STEP 2: Controller
         yield "data: " + json.dumps({"agent": "Controller", "message": "🔍 ვიწყებ ვალიდაციას...", "step": 2, "status": "active"}) + "\n\n"
         yield "data: " + json.dumps({"agent": "Controller", "message": f"📋 შესამოწმებელი: {team_data}", "step": 2, "status": "active"}) + "\n\n"
         await asyncio.sleep(1)
