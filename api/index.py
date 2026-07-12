@@ -59,7 +59,6 @@ class APIVault:
         
         try:
             if provider == "google":
-                # Google Gemini - list models
                 url = f"{config['base_url']}/models?key={api_key}"
                 async with httpx.AsyncClient() as client:
                     response = await client.get(url, timeout=10.0)
@@ -68,15 +67,13 @@ class APIVault:
                         models = []
                         for model in data.get("models", []):
                             name = model.get("name", "")
-                            # ვიღებთ მხოლოდ უფასო მოდელებს (flash variants)
                             if "flash" in name.lower() or "pro" in name.lower():
                                 models.append(name.replace("models/", ""))
                         config["available_models"] = models
-                        print(f"[API Vault] Google {len(models)} მოდელი ხელმისაწვდომია: {models}")
+                        print(f"[API Vault] Google {len(models)} მოდელი: {models}")
                         return models
             
             elif provider == "groq":
-                # Groq - list models
                 url = f"{config['base_url']}/models"
                 headers = {
                     "Authorization": f"Bearer {api_key}",
@@ -88,11 +85,11 @@ class APIVault:
                         data = response.json()
                         models = [m["id"] for m in data.get("data", [])]
                         config["available_models"] = models
-                        print(f"[API Vault] Groq {len(models)} მოდელი ხელმისაწვდომია: {models}")
+                        print(f"[API Vault] Groq {len(models)} მოდელი: {models}")
                         return models
         
         except Exception as e:
-            print(f"[API Vault] {provider} მოდელების გამოთხოვის შეცდომა: {e}")
+            print(f"[API Vault] {provider} მოდელების შეცდომა: {e}")
         
         return []
     
@@ -104,24 +101,20 @@ class APIVault:
         if not models:
             return None
         
-        # ვირჩევთ უფასო/სწრაფ მოდელებს პრიორიტეტით
         if provider == "google":
-            # ვეძებთ flash მოდელებს (უფასო)
             for model in models:
                 if "flash" in model.lower():
                     config["selected_model"] = model
-                    print(f"[API Vault] Google არჩეული მოდელი: {model}")
+                    print(f"[API Vault] Google არჩეული: {model}")
                     return model
-            # თუ flash არ არის, ვირჩევთ პირველს
             config["selected_model"] = models[0]
             return models[0]
         
         elif provider == "groq":
-            # Groq-ზე ვირჩევთ llama-3.3-70b ან მსგავსს
             for model in models:
                 if "llama-3.3" in model.lower() or "llama-3" in model.lower():
                     config["selected_model"] = model
-                    print(f"[API Vault] Groq არჩეული მოდელი: {model}")
+                    print(f"[API Vault] Groq არჩეული: {model}")
                     return model
             config["selected_model"] = models[0]
             return models[0]
@@ -129,7 +122,7 @@ class APIVault:
         return None
     
     async def initialize_provider(self, provider: str) -> Tuple[bool, str]:
-        """ინიციალიზაცია პროვაიდერს - ამოწმებს გასაღებს და ირჩევს მოდელს"""
+        """ინიციალიზაცია პროვაიდერს"""
         if provider not in self.providers:
             return False, "პროვაიდერი არ არსებობს"
         
@@ -138,13 +131,11 @@ class APIVault:
         if not config["api_key"]:
             return False, f"{config['name']} API გასაღები არ არის დაყენებული"
         
-        # ვითხოვთ მოდელებს
         models = await self.fetch_available_models(provider)
         
         if not models:
             return False, f"{config['name']} მოდელები ვერ მოიძებნა"
         
-        # ვირჩევთ საუკეთესო მოდელს
         selected = self.select_best_model(provider)
         
         if not selected:
@@ -179,6 +170,8 @@ class TeamScout:
     
     def normalize_url(self, url: str) -> str:
         """ნორმალიზაცია URL-ს"""
+        print(f"[TeamScout] normalize_url - ორიგინალი: {url}")
+        
         if url.endswith('/players/'):
             url = url[:-len('/players/')]
         elif url.endswith('/players'):
@@ -187,39 +180,50 @@ class TeamScout:
         if not url.endswith('/'):
             url += '/'
         
+        print(f"[TeamScout] normalize_url - ნორმალიზებული: {url}")
         return url
     
-    async def fetch_page_direct(self, url: str) -> Optional[str]:
-        """პირდაპირ ცდილობს გვერდის გადმოწერას"""
+    async def fetch_page_direct(self, url: str) -> Tuple[Optional[str], str]:
+        """პირდაპირ ცდილობს გვერდის გადმოწერას - დეტალური ლოგებით"""
         try:
-            print(f"[TeamScout] ვცდილობ პირდაპირ გადმოწერას: {url}")
+            print(f"[TeamScout] fetch_page_direct - ვცდილობ: {url}")
+            print(f"[TeamScout] ვიყენებ headers: {self.headers['User-Agent'][:50]}...")
             
             for attempt in range(2):
+                print(f"[TeamScout] მცდელობა {attempt + 1}/2...")
+                
                 async with httpx.AsyncClient(
                     follow_redirects=True,
                     timeout=30.0,
                     verify=False
                 ) as client:
+                    print(f"[TeamScout] ვაგზავნით GET request-ს...")
                     response = await client.get(url, headers=self.headers)
-                    print(f"[TeamScout] Response status: {response.status_code}")
+                    print(f"[TeamScout] მივიღეთ response: status={response.status_code}")
                     
                     if response.status_code == 200:
-                        print(f"[TeamScout] HTML სიგრძე: {len(response.text)} bytes")
-                        return response.text
+                        html_length = len(response.text)
+                        print(f"[TeamScout] ✅ წარმატება! HTML სიგრძე: {html_length} bytes")
+                        return response.text, f"წარმატება ({html_length} bytes)"
                     elif response.status_code in [403, 429]:
-                        print(f"[TeamScout] {response.status_code} - ბლოკი, ვცდილობ თავიდან...")
-                        await asyncio.sleep(1)
-                        continue
+                        print(f"[TeamScout] ❌ {response.status_code} - საიტი ბლოკავს")
+                        if attempt < 1:
+                            print(f"[TeamScout] ვცდილობ თავიდან 1 წამის შემდეგ...")
+                            await asyncio.sleep(1)
+                            continue
+                        return None, f"{response.status_code} - საიტი ბლოკავს"
                     else:
+                        print(f"[TeamScout] ❌ HTTP შეცდომა: {response.status_code}")
                         response.raise_for_status()
             
-            return None
+            return None, "მაქსიმალური მცდელობების რაოდენობა ამოიწურა"
         except Exception as e:
-            print(f"[TeamScout] პირდაპირი გადმოწერის შეცდომა: {e}")
-            return None
+            error_msg = f"{type(e).__name__}: {str(e)}"
+            print(f"[TeamScout] ❌ შეცდომა: {error_msg}")
+            return None, error_msg
     
     async def fetch_with_google(self, url: str) -> Tuple[Optional[str], str]:
-        """იყენებს Google Gemini-ს გვერდის წასაკითხად"""
+        """იყენებს Google Gemini-ს გვერდის წასაკითხად - დეტალური ლოგებით"""
         config = self.api_vault.providers["google"]
         
         if not config["api_key"] or not config["selected_model"]:
@@ -227,7 +231,10 @@ class TeamScout:
         
         try:
             model = config["selected_model"]
+            print(f"[TeamScout] Google - ვიყენებ მოდელს: {model}")
+            
             api_url = f"{config['base_url']}/models/{model}:generateContent?key={config['api_key']}"
+            print(f"[TeamScout] Google API URL: {api_url[:80]}...")
             
             prompt = f"""წაიკითხე ეს URL და ამოიღე გუნდის ინფორმაცია JSON ფორმატში:
 URL: {url}
@@ -245,6 +252,8 @@ URL: {url}
 
 თუ ვერ იპოვი რაიმე ველი, დატოვე ცარიელი."""
 
+            print(f"[TeamScout] Google prompt სიგრძე: {len(prompt)} სიმბოლო")
+            
             payload = {
                 "contents": [{
                     "parts": [{"text": prompt}]
@@ -254,22 +263,35 @@ URL: {url}
                 }]
             }
             
+            print(f"[TeamScout] Google-ს ვუგზავნი payload-ს...")
+            
             async with httpx.AsyncClient() as client:
+                print(f"[TeamScout] ვაგზავნით POST request-ს Google-ში...")
                 response = await client.post(api_url, json=payload, timeout=60.0)
+                print(f"[TeamScout] Google response status: {response.status_code}")
                 
                 if response.status_code == 200:
                     data = response.json()
+                    print(f"[TeamScout] Google response მიღებულია, ვპარსავ...")
+                    
                     text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                    print(f"[TeamScout] Google-მა დააბრუნა: {text[:200]}...")
+                    print(f"[TeamScout] Google-მა დააბრუნა ტექსტი: {len(text)} სიმბოლო")
+                    print(f"[TeamScout] ტექსტის პირველი 300 სიმბოლო: {text[:300]}...")
+                    
                     return text, "წარმატება"
                 else:
+                    error_text = response.text[:200]
+                    print(f"[TeamScout] ❌ Google API შეცდომა: {response.status_code}")
+                    print(f"[TeamScout] Error text: {error_text}")
                     return None, f"Google API შეცდომა: {response.status_code}"
         
         except Exception as e:
-            return None, f"Google შეცდომა: {str(e)}"
+            error_msg = f"{type(e).__name__}: {str(e)}"
+            print(f"[TeamScout] ❌ Google შეცდომა: {error_msg}")
+            return None, error_msg
     
     async def fetch_with_groq(self, url: str) -> Tuple[Optional[str], str]:
-        """იყენებს Groq-ს გვერდის წასაკითხად"""
+        """იყენებს Groq-ს გვერდის წასაკითხად - დეტალური ლოგებით"""
         config = self.api_vault.providers["groq"]
         
         if not config["api_key"] or not config["selected_model"]:
@@ -277,7 +299,10 @@ URL: {url}
         
         try:
             model = config["selected_model"]
+            print(f"[TeamScout] Groq - ვიყენებ მოდელს: {model}")
+            
             api_url = f"{config['base_url']}/chat/completions"
+            print(f"[TeamScout] Groq API URL: {api_url}")
             
             headers = {
                 "Authorization": f"Bearer {config['api_key']}",
@@ -300,6 +325,8 @@ URL: {url}
 
 თუ ვერ იპოვი რაიმე ველი, დატოვე ცარიელი."""
 
+            print(f"[TeamScout] Groq prompt სიგრძე: {len(prompt)} სიმბოლო")
+            
             payload = {
                 "model": model,
                 "messages": [
@@ -308,22 +335,38 @@ URL: {url}
                 "temperature": 0.1
             }
             
+            print(f"[TeamScout] Groq-ს ვუგზავნი payload-ს...")
+            
             async with httpx.AsyncClient() as client:
+                print(f"[TeamScout] ვაგზავნით POST request-ს Groq-ში...")
                 response = await client.post(api_url, headers=headers, json=payload, timeout=60.0)
+                print(f"[TeamScout] Groq response status: {response.status_code}")
                 
                 if response.status_code == 200:
                     data = response.json()
+                    print(f"[TeamScout] Groq response მიღებულია, ვპარსავ...")
+                    
                     text = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-                    print(f"[TeamScout] Groq-მა დააბრუნა: {text[:200]}...")
+                    print(f"[TeamScout] Groq-მა დააბრუნა ტექსტი: {len(text)} სიმბოლო")
+                    print(f"[TeamScout] ტექსტის პირველი 300 სიმბოლო: {text[:300]}...")
+                    
                     return text, "წარმატება"
                 else:
+                    error_text = response.text[:200]
+                    print(f"[TeamScout] ❌ Groq API შეცდომა: {response.status_code}")
+                    print(f"[TeamScout] Error text: {error_text}")
                     return None, f"Groq API შეცდომა: {response.status_code}"
         
         except Exception as e:
-            return None, f"Groq შეცდომა: {str(e)}"
+            error_msg = f"{type(e).__name__}: {str(e)}"
+            print(f"[TeamScout] ❌ Groq შეცდომა: {error_msg}")
+            return None, error_msg
     
     def parse_ai_response(self, ai_text: str) -> Dict:
-        """პარსავს AI-ის პასუხს JSON-ად"""
+        """პარსავს AI-ის პასუხს JSON-ად - დეტალური ლოგებით"""
+        print(f"[TeamScout] parse_ai_response - ვიწყებ პარსინგს...")
+        print(f"[TeamScout] ტექსტის სიგრძე: {len(ai_text)} სიმბოლო")
+        
         team_data = {
             "name": "",
             "short_code": "",
@@ -339,7 +382,10 @@ URL: {url}
             json_match = re.search(r'\{[^{}]*\}', ai_text, re.DOTALL)
             if json_match:
                 json_str = json_match.group(0)
+                print(f"[TeamScout] ვიპოვე JSON: {json_str[:200]}...")
+                
                 data = json.loads(json_str)
+                print(f"[TeamScout] JSON წარმატებით დაპარსულია: {data}")
                 
                 team_data["name"] = data.get("name", "")
                 team_data["short_code"] = data.get("short_code", "")
@@ -349,72 +395,76 @@ URL: {url}
                 team_data["coach"] = data.get("coach", "")
                 team_data["logo_url"] = data.get("logo_url", "")
                 
-                print(f"[TeamScout] AI პასუხი წარმატებით დაპარსულია: {team_data}")
+                print(f"[TeamScout] საბოლოო team_data: {team_data}")
+            else:
+                print(f"[TeamScout] ❌ JSON ვერ ვიპოვე ტექსტში")
         except Exception as e:
-            print(f"[TeamScout] AI პასუხის პარსინგის შეცდომა: {e}")
+            print(f"[TeamScout] ❌ პარსინგის შეცდომა: {e}")
         
         return team_data
     
     async def scout_team(self, url: str) -> Dict:
         """მთავარი ფუნქცია - აგროვებს გუნდის ინფორმაციას"""
         normalized_url = self.normalize_url(url)
-        print(f"[TeamScout] ნორმალიზებული URL: {normalized_url}")
         
-        # STEP 1: ვცდილობთ პირდაპირ გადმოწერას
-        print("[TeamScout] STEP 1: პირდაპირი გადმოწერა...")
-        html = await self.fetch_page_direct(normalized_url)
+        # STEP 1: პირდაპირი გადმოწერა
+        print("[TeamScout] ========== STEP 1: პირდაპირი გადმოწერა ==========")
+        html, direct_msg = await self.fetch_page_direct(normalized_url)
         
         if html:
-            print("[TeamScout] პირდაპირი გადმოწერა წარმატებით დასრულდა!")
-            # TODO: დავამატოთ HTML parsing ლოგიკა
+            print(f"[TeamScout] ✅ პირდაპირი გადმოწერა წარმატებით!")
             return {
                 "success": True,
                 "data": self.parse_team_info(html, normalized_url),
                 "method": "direct",
-                "raw_html_length": len(html)
+                "message": direct_msg
             }
         
-        # STEP 2: ვცდილობთ Google Gemini-ს
-        print("[TeamScout] STEP 2: Google Gemini...")
-        ai_text, ai_msg = await self.fetch_with_google(normalized_url)
+        print(f"[TeamScout] ❌ პირდაპირი წარუმატებელი: {direct_msg}")
+        
+        # STEP 2: Google Gemini
+        print("[TeamScout] ========== STEP 2: Google Gemini ==========")
+        ai_text, google_msg = await self.fetch_with_google(normalized_url)
         
         if ai_text:
-            print(f"[TeamScout] Google წარმატება: {ai_msg}")
+            print(f"[TeamScout] ✅ Google წარმატება!")
             team_data = self.parse_ai_response(ai_text)
             return {
                 "success": True,
                 "data": team_data,
                 "method": "google",
-                "model": self.api_vault.providers["google"]["selected_model"]
+                "model": self.api_vault.providers["google"]["selected_model"],
+                "message": google_msg
             }
         
-        print(f"[TeamScout] Google წარუმატებელი: {ai_msg}")
+        print(f"[TeamScout] ❌ Google წარუმატებელი: {google_msg}")
         
-        # STEP 3: ვცდილობთ Groq-ს
-        print("[TeamScout] STEP 3: Groq...")
-        ai_text, ai_msg = await self.fetch_with_groq(normalized_url)
+        # STEP 3: Groq
+        print("[TeamScout] ========== STEP 3: Groq ==========")
+        ai_text, groq_msg = await self.fetch_with_groq(normalized_url)
         
         if ai_text:
-            print(f"[TeamScout] Groq წარმატება: {ai_msg}")
+            print(f"[TeamScout] ✅ Groq წარმატება!")
             team_data = self.parse_ai_response(ai_text)
             return {
                 "success": True,
                 "data": team_data,
                 "method": "groq",
-                "model": self.api_vault.providers["groq"]["selected_model"]
+                "model": self.api_vault.providers["groq"]["selected_model"],
+                "message": groq_msg
             }
         
-        print(f"[TeamScout] Groq წარუმატებელი: {ai_msg}")
+        print(f"[TeamScout] ❌ Groq წარუმატებელი: {groq_msg}")
         
-        # ყველა მეთოდი წარუმატებელია
         return {
             "success": False,
-            "error": "ვერცერთმა მეთოდმა ვერ მოახერხა მონაცემების მოპოვება",
+            "error": "ვერცერთმა მეთოდმა ვერ მოახერხა",
             "data": None
         }
     
     def parse_team_info(self, html: str, url: str) -> Dict:
         """პარსავს გუნდის ინფორმაციას HTML-დან"""
+        print(f"[TeamScout] parse_team_info - ვიწყებ HTML პარსინგს...")
         soup = BeautifulSoup(html, 'lxml')
         
         team_data = {
@@ -427,10 +477,13 @@ URL: {url}
             "logo_url": ""
         }
         
-        # გუნდის სახელი
         h1_tags = soup.find_all('h1')
+        print(f"[TeamScout] ვიპოვე {len(h1_tags)} h1 tag")
+        
         for h1 in h1_tags:
             text = h1.get_text(strip=True)
+            print(f"[TeamScout] h1 ტექსტი: {text}")
+            
             if 'состав' not in text.lower():
                 if '(' in text and ')' in text:
                     match = re.match(r'^([^(]+)\s*\(([^)]+)\)', text)
@@ -445,15 +498,15 @@ URL: {url}
                     team_data["name"] = text
                 break
         
-        # ლოგო
         og_image = soup.find('meta', property='og:image')
         if og_image:
             team_data["logo_url"] = og_image.get('content', '')
+            print(f"[TeamScout] ლოგო: {team_data['logo_url']}")
         
-        # Short code
         if team_data["name"]:
             team_data["short_code"] = team_data["name"][:3].upper()
         
+        print(f"[TeamScout] საბოლოო team_data: {team_data}")
         return team_data
 
 # ============================================
@@ -523,15 +576,28 @@ class ControllerBot:
             self.supabase = None
     
     def validate_team(self, team_data: Dict) -> Tuple[bool, List[str]]:
+        print(f"[Controller] validate_team - ვიწყებ ვალიდაციას...")
+        print(f"[Controller] შესამოწმებელი მონაცემები: {team_data}")
+        
         errors = []
         
         if not team_data.get("name"):
             errors.append("სახელი აუცილებელია")
+            print(f"[Controller] ❌ სახელი ცარიელია")
+        else:
+            print(f"[Controller] ✅ სახელი: {team_data['name']}")
         
         if not team_data.get("short_code"):
             errors.append("მოკლე კოდი აუცილებელია")
+            print(f"[Controller] ❌ მოკლე კოდი ცარიელია")
+        else:
+            print(f"[Controller] ✅ მოკლე კოდი: {team_data['short_code']}")
         
-        return len(errors) == 0, errors
+        is_valid = len(errors) == 0
+        print(f"[Controller] ვალიდაციის შედეგი: {'✅ წარმატება' if is_valid else '❌ წარუმატებელი'}")
+        print(f"[Controller] შეცდომები: {errors}")
+        
+        return is_valid, errors
 
 # ============================================
 # API Vault Instance
@@ -547,7 +613,6 @@ async def root():
 
 @app.post("/api/vault/set-key")
 async def set_api_key(request: dict):
-    """აყენებს API გასაღებს"""
     provider = request.get("provider")
     api_key = request.get("api_key")
     
@@ -559,7 +624,6 @@ async def set_api_key(request: dict):
 
 @app.post("/api/vault/initialize")
 async def initialize_provider(request: dict):
-    """ინიციალიზაცია პროვაიდერს"""
     provider = request.get("provider")
     
     if not provider:
@@ -1193,128 +1257,12 @@ async def stream_scout(url: str):
             "step": 1,
             "status": "active"
         }) + "\n\n"
-        await asyncio.sleep(0.5)
-        
-        html = await scout.fetch_page_direct(scout.normalize_url(url))
-        
-        if html:
-            yield "data: " + json.dumps({
-                "agent": "TeamScout", 
-                "message": f"✅ პირდაპირი გადმოწერა წარმატებით! ({len(html)} bytes)",
-                "step": 1,
-                "status": "completed"
-            }) + "\n\n"
-            
-            team_data = scout.parse_team_info(html, url)
-            
-            yield "data: " + json.dumps({
-                "agent": "TeamScout", 
-                "message": f"🏆 გუნდი: {team_data['name'] or 'არ მოიძებნა'}",
-                "step": 1,
-                "status": "completed"
-            }) + "\n\n"
-        else:
-            yield "data: " + json.dumps({
-                "agent": "TeamScout", 
-                "message": "❌ პირდაპირი გადმოწერა წარუმატებელია",
-                "step": 1,
-                "status": "error"
-            }) + "\n\n"
-            
-            # STEP 2: Google Gemini
-            yield "data: " + json.dumps({
-                "agent": "TeamScout", 
-                "message": "🔵 მცდელობა 2: Google Gemini...",
-                "step": 1,
-                "status": "active"
-            }) + "\n\n"
-            await asyncio.sleep(0.5)
-            
-            ai_text, ai_msg = await scout.fetch_with_google(url)
-            
-            if ai_text:
-                yield "data: " + json.dumps({
-                    "agent": "TeamScout", 
-                    "message": f"✅ Google წარმატება! მოდელი: {api_vault.providers['google']['selected_model']}",
-                    "step": 1,
-                    "status": "completed"
-                }) + "\n\n"
-                
-                team_data = scout.parse_ai_response(ai_text)
-            else:
-                yield "data: " + json.dumps({
-                    "agent": "TeamScout", 
-                    "message": f"❌ Google წარუმატებელი: {ai_msg}",
-                    "step": 1,
-                    "status": "error"
-                }) + "\n\n"
-                
-                # STEP 3: Groq
-                yield "data: " + json.dumps({
-                    "agent": "TeamScout", 
-                    "message": "🟠 მცდელობა 3: Groq...",
-                    "step": 1,
-                    "status": "active"
-                }) + "\n\n"
-                await asyncio.sleep(0.5)
-                
-                ai_text, ai_msg = await scout.fetch_with_groq(url)
-                
-                if ai_text:
-                    yield "data: " + json.dumps({
-                        "agent": "TeamScout", 
-                        "message": f"✅ Groq წარმატება! მოდელი: {api_vault.providers['groq']['selected_model']}",
-                        "step": 1,
-                        "status": "completed"
-                    }) + "\n\n"
-                    
-                    team_data = scout.parse_ai_response(ai_text)
-                else:
-                    yield "data: " + json.dumps({
-                        "agent": "TeamScout", 
-                        "message": f"❌ ყველა მეთოდი წარუმატებელია",
-                        "step": 1,
-                        "status": "error",
-                        "done": True
-                    }) + "\n\n"
-                    return
-        
-        # STEP 2: Controller
         yield "data: " + json.dumps({
-            "agent": "Controller", 
-            "message": "🔍 ვიწყებ ვალიდაციას...",
-            "step": 2,
+            "agent": "TeamScout", 
+            "message": f"🔧 ვიყენებ headers: User-Agent, Accept-Language, Sec-Fetch...",
+            "step": 1,
             "status": "active"
         }) + "\n\n"
-        await asyncio.sleep(1)
-        
-        is_valid, errors = controller.validate_team(team_data)
-        
-        if not is_valid:
-            yield "data: " + json.dumps({
-                "agent": "Controller", 
-                "message": f"❌ ვალიდაცია ვერ გაიარა: {', '.join(errors)}",
-                "step": 2,
-                "status": "error",
-                "done": True
-            }) + "\n\n"
-            return
-        
         yield "data: " + json.dumps({
-            "agent": "Controller", 
-            "message": "✅ ვალიდაცია წარმატებით გაიარა",
-            "step": 2,
-            "status": "completed"
-        }) + "\n\n"
-        
-        # STEP 3: ვიზუალიზაცია
-        yield "data: " + json.dumps({
-            "agent": "Controller", 
-            "message": "📊 მონაცემები მზად არის",
-            "step": 3,
-            "status": "completed",
-            "done": True,
-            "team_data": team_data
-        }) + "\n\n"
-    
-    return StreamingResponse(agent_runner(), media_type="text/event-stream")
+            "agent": "TeamScout", 
+            "message": f"📡 ვაგზავნი
