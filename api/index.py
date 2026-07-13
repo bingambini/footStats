@@ -56,7 +56,7 @@ class ParsedPlayersSchema(BaseModel):
     players: List[PlayerSchema] = Field(..., description="მოთამაშეების სია")
 
 # ==========================================
-# Supabase & API Vault (განახლებული)
+# Supabase & API Vault
 # ==========================================
 _supabase_client = None
 def get_supabase():
@@ -79,14 +79,13 @@ class APIVault:
         }
     
     def load_from_db(self):
-        """ტვირთავს გასაღებებს Supabase-დან"""
+        """ტვირთავს გასაღებებს Supabase-დან ყოველ ჯერზე"""
         try:
             supabase = get_supabase()
             if not supabase:
                 logger.warning("Supabase არ არის ხელმისაწვდომი")
                 return False
             
-            # ვამოწმებთ ცხრილის არსებობას
             try:
                 response = supabase.table("api_keys").select("*").execute()
                 for row in response.data:
@@ -97,7 +96,6 @@ class APIVault:
                 return True
             except Exception as e:
                 logger.error(f"api_keys ცხრილის წაკითხვის შეცდომა: {e}")
-                logger.error("დარწმუნდი, რომ api_keys ცხრილი არსებობს Supabase-ში!")
                 return False
         except Exception as e:
             logger.error(f"DB Load Error: {e}")
@@ -191,13 +189,10 @@ class TeamScout:
             return None, f"AI შეცდომა: {str(e)}"
 
 class TextParser:
-    """უნივერსალური ტექსტის პარსერი - AI-ის დახმარებით"""
-    
     def __init__(self, api_vault: APIVault):
         self.api_vault = api_vault
     
     def parse_team_from_text(self, text: str) -> Dict:
-        """გუნდის ძირითადი ინფორმაციის ამოღება ტექსტიდან"""
         team_data = {"name": "", "short_code": "", "city": "", "country": "", "stadium": "", "coach": "", "logo_url": ""}
         lines = text.strip().split('\n')
         if lines: team_data["name"] = lines[0].strip()
@@ -215,15 +210,12 @@ class TextParser:
         return {"success": True, "data": team_data, "players_count": 0}
     
     async def parse_players_from_text(self, text: str) -> Tuple[Optional[ParsedPlayersSchema], str]:
-        """არასტრუქტურირებული ტექსტის გადაყვანა სტრუქტურირებულ JSON-ში AI-ის მეშვეობით"""
         if not HAS_INSTRUCTOR:
             return None, "instructor/litellm არ არის დაყენებული"
         
-        # ჯერ ვცადოთ Google Gemini
         google_config = self.api_vault.get_provider("google")
         groq_config = self.api_vault.get_provider("groq")
         
-        # თუ Google-ს აქვს გასაღები, ვცადოთ ის
         if google_config.get("api_key"):
             logger.info("ვცდილობ Google Gemini-ს...")
             result, msg = await self._try_parse_with_model(google_config, text)
@@ -232,7 +224,6 @@ class TextParser:
             else:
                 logger.warning(f"Google Gemini ვერ მოახერხა: {msg}")
         
-        # თუ Google ვერ მოახერხა, ვცადოთ Groq
         if groq_config.get("api_key"):
             logger.info("ვცდილობ Groq-ს (Llama 3.3)...")
             result, msg = await self._try_parse_with_model(groq_config, text)
@@ -244,7 +235,6 @@ class TextParser:
         return None, "ვერცერთმა LLM-მა ვერ მოახერხა ტექსტის დამუშავება"
     
     async def _try_parse_with_model(self, config: Dict, text: str) -> Tuple[Optional[ParsedPlayersSchema], str]:
-        """ცდის კონკრეტულ მოდელს"""
         model, api_key = config["selected_model"], config["api_key"]
         
         try:
@@ -265,17 +255,17 @@ class TextParser:
 - shirt_number: მოთამაშის ნომერი (რიცხვი)
 - name: სრული სახელი და გვარი
 - position: ამპლუა (вратарь=მეკარე, защитник=მცველი, полузащитник=ნახევარმცველი, нападающий=თავდამსხმელი)
-- nationality: მოქალაქეობა (პირველი ქვეყანა თუ რამდენიმეა)
-- birth_date: დაბადების თარიღი DD.MM.YYYY ფორმატში
-- age: ასაკი (გამოთვალე თარიღიდან ან აიღე ტექსტიდან)
-- height_cm: სიმაღლე სანტიმეტრებში (მხოლოდ რიცხვი)
-- weight_kg: წონა კილოგრამებში (მხოლოდ რიცხვი)
+- nationality: მოქალაქეობა
+- birth_date: დაბადების თარიღი DD.MM.YYYY
+- age: ასაკი (რიცხვი)
+- height_cm: სიმაღლე სმ-ში (რიცხვი)
+- weight_kg: წონა კგ-ში (რიცხვი)
 
-თუ რაიმე ველი არ არის მითითებული ტექსტში, გამოიყენე null ან დეფოლტ მნიშვნელობა."""
+თუ რაიმე ველი არ არის მითითებული, გამოიყენე null ან დეფოლტ მნიშვნელობა."""
                     },
                     {
                         "role": "user", 
-                        "content": f"გადაამუშავე ეს არასტრუქტურირებული ტექსტი და ამოიღე ყველა მოთამაშის ინფორმაცია:\n\n{text}"
+                        "content": f"გადაამუშავე ეს ტექსტი და ამოიღე ყველა მოთამაშის ინფორმაცია:\n\n{text}"
                     }
                 ]
             )
@@ -400,7 +390,6 @@ async def stream_scout(url: str):
 
 @app.get("/api/agent/stream-parse-players")
 async def stream_parse_players(text: str):
-    """ჩასმული ტექსტის AI პარსინგი"""
     parser = TextParser(api_vault)
     
     async def agent_runner():
@@ -481,7 +470,6 @@ async def get_dashboard():
                 <button onclick="switchTab('paste')" id="tab-paste" class="tab-inactive px-6 py-3 rounded-lg font-semibold">📋 Paste & Parse (რეკომენდებული!)</button>
             </div>
 
-            <!-- TEAM SECTION -->
             <div id="section-team" class="bg-[#0E1424] border border-gray-800 rounded-xl p-6 mb-8">
                 <h3 class="text-lg font-bold text-white mb-4">🎯 გუნდის URL</h3>
                 <div class="flex gap-3">
@@ -490,7 +478,6 @@ async def get_dashboard():
                 </div>
             </div>
 
-            <!-- PASTE SECTION -->
             <div id="section-paste" class="hidden bg-[#0E1424] border-2 border-emerald-600 rounded-xl p-6 mb-8">
                 <div class="flex items-center justify-between mb-4">
                     <h3 class="text-lg font-bold text-white">📋 Paste & Parse (რეკომენდებული!)</h3>
