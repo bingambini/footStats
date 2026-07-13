@@ -228,10 +228,39 @@ async def get_vault_status():
 
 @app.post("/api/vault/set-key")
 async def set_api_key(request: dict):
-    provider, api_key = request.get("provider"), request.get("api_key")
-    if not provider or not api_key: return {"success": False, "error": "მონაცემები აკლია"}
+    provider = request.get("provider")
+    api_key = request.get("api_key")
+    if not provider or not api_key:
+        return {"success": False, "error": "მონაცემები აკლია"}
+    
+    # 1. ვინახავთ მეხსიერებაში (RAM)
     api_vault.set_api_key(provider, api_key)
-    # Note: DB save logic simplified for brevity, assumes vault handles it or we add it back if needed
+    
+    # 2. ვინახავთ რეალურად Supabase-ში (გამოსწორებული ლოგიკა)
+    try:
+        supabase = get_supabase()
+        if supabase:
+            config = api_vault.get_provider(provider)
+            data = {
+                "provider": provider,
+                "api_key": config["api_key"],
+                "selected_model": config["selected_model"]
+            }
+            
+            # ვამოწმებთ, უკვე არსებობს თუ არა ეს პროვაიდერი ბაზაში
+            existing = supabase.table("api_keys").select("id").eq("provider", provider).execute()
+            
+            if existing.data:
+                # თუ არსებობს, ვაახლებთ
+                supabase.table("api_keys").update(data).eq("provider", provider).execute()
+            else:
+                # თუ არ არსებობს, ვქმნით ახალ ჩანაწერს
+                supabase.table("api_keys").insert(data).execute()
+                
+            logger.info(f"{provider} გასაღები წარმატებით შენახულია Supabase-ში")
+    except Exception as e:
+        logger.error(f"Supabase-ში შენახვის შეცდომა: {e}")
+        
     return {"success": True, "message": f"{provider} გასაღები შენახულია"}
 
 @app.post("/api/vault/initialize")
