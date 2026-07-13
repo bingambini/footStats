@@ -8,3 +8,4 @@ instructor
 litellm
 loguru
 supabase
+orjson
