@@ -1,6 +1,10 @@
-supabase
 fastapi
 pydantic
 httpx
 beautifulsoup4
 lxml
+curl-cffi
+instructor
+litellm
+loguru
+supabase
