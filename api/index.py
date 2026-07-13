@@ -10,6 +10,9 @@ import httpx
 from bs4 import BeautifulSoup
 from loguru import logger
 
+# ✅ ვაულტის იმპორტი
+import vault
+
 try:
     from curl_cffi import requests as cffi_requests
     HAS_CURL_CFFI = True
@@ -41,12 +44,12 @@ class TeamSchema(BaseModel):
 class PlayerSchema(BaseModel):
     shirt_number: int = Field(default=0, description="მოთამაშის ნომერი. თუ არ ჩანს, ჩაწერე 0")
     name: str = Field(..., description="მოთამაშის სრული სახელი და გვარი")
-    position: str = Field(default="უცნობი", description="ამპლუა (вратарь, защитник, полузащитник, нападающий)")
+    position: str = Field(default="უცნობი", description="ამპლუა")
     nationality: str = Field(default="უცნობი", description="მოქალაქეობა")
     birth_date: str = Field(default="უცნობი", description="დაბადების თარიღი DD.MM.YYYY")
-    age: int = Field(default=0, description="ასაკი (მხოლოდ რიცხვი). გამოთვალე თარიღიდან ან ჩაწერე 0")
-    height_cm: Optional[int] = Field(default=None, description="სიმაღლე სმ-ში. თუ არ არის, ჩაწერე null")
-    weight_kg: Optional[int] = Field(default=None, description="წონა კგ-ში. თუ არ არის, ჩაწერე null")
+    age: int = Field(default=0, description="ასაკი (მხოლოდ რიცხვი)")
+    height_cm: Optional[int] = Field(default=None, description="სიმაღლე სმ-ში")
+    weight_kg: Optional[int] = Field(default=None, description="წონა კგ-ში")
 
 class SquadSchema(BaseModel):
     team_name: str = Field(default="უცნობი გუნდი")
@@ -56,64 +59,10 @@ class ParsedPlayersSchema(BaseModel):
     players: List[PlayerSchema] = Field(..., description="მოთამაშეების სია")
 
 # ==========================================
-# Supabase & API Vault
-# ==========================================
-_supabase_client = None
-def get_supabase():
-    global _supabase_client
-    if _supabase_client is None:
-        try:
-            from supabase import create_client
-            if os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_KEY"):
-                _supabase_client = create_client(os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_KEY"))
-                logger.info("Supabase კლიენტი ინიციალიზდა")
-        except Exception as e:
-            logger.error(f"Supabase Error: {e}")
-    return _supabase_client
-
-class APIVault:
-    def __init__(self):
-        self.providers_cache = {
-            "google": {"name": "Google Gemini", "api_key": None, "selected_model": "gemini/gemini-2.5-flash"},
-            "groq": {"name": "Groq", "api_key": None, "selected_model": "groq/llama-3.3-70b-versatile"}
-        }
-    
-    def load_from_db(self):
-        try:
-            supabase = get_supabase()
-            if not supabase:
-                logger.warning("Supabase არ არის ხელმისაწვდომი")
-                return False
-            try:
-                response = supabase.table("api_keys").select("*").execute()
-                for row in response.data:
-                    if row["provider"] in self.providers_cache:
-                        self.providers_cache[row["provider"]]["api_key"] = row["api_key"]
-                        self.providers_cache[row["provider"]]["selected_model"] = row.get("selected_model") or self.providers_cache[row["provider"]]["selected_model"]
-                        logger.info(f"{row['provider']} გასაღები ჩაიტვირთა DB-დან")
-                return True
-            except Exception as e:
-                logger.error(f"api_keys ცხრილის წაკითხვის შეცდომა: {e}")
-                return False
-        except Exception as e:
-            logger.error(f"DB Load Error: {e}")
-            return False
-    
-    def set_api_key(self, provider: str, api_key: str):
-        if provider in self.providers_cache:
-            self.providers_cache[provider]["api_key"] = api_key
-            
-    def get_provider(self, provider: str) -> Dict:
-        return self.providers_cache.get(provider, {})
-
-api_vault = APIVault()
-
-# ==========================================
 # Agents
 # ==========================================
 class TeamScout:
-    def __init__(self, api_vault: APIVault):
-        self.api_vault = api_vault
+    def __init__(self):
         self.headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
     
     def normalize_url(self, url: str) -> str:
@@ -163,13 +112,16 @@ class TeamScout:
         return team_data
 
     async def fetch_with_ai(self, team_name: str) -> Tuple[Optional[TeamSchema], str]:
-        if not HAS_INSTRUCTOR: return None, "instructor/litellm არ არის დაყენებული"
-        config = self.api_vault.get_provider("google")
-        if not config.get("api_key"):
-            config = self.api_vault.get_provider("groq")
-            if not config.get("api_key"): return None, "არცერთი LLM გასაღები არ არის აქტიური"
-
-        model, api_key = config["selected_model"], config["api_key"]
+        if not HAS_INSTRUCTOR: 
+            return None, "instructor/litellm არ არის დაყენებული"
+        
+        # ✅ ვაულტიდან ვიღებთ გასაღებს
+        api_key = vault.get_key("google") or vault.get_key("groq")
+        if not api_key:
+            return None, "არცერთი LLM გასაღები არ არის აქტიური"
+        
+        model = vault.get_model("google") or vault.get_model("groq")
+        
         try:
             client = instructor.from_litellm(litellm.acompletion)
             os.environ["GEMINI_API_KEY"] = api_key if "gemini" in model else ""
@@ -187,8 +139,8 @@ class TeamScout:
             return None, f"AI შეცდომა: {str(e)}"
 
 class TextParser:
-    def __init__(self, api_vault: APIVault):
-        self.api_vault = api_vault
+    def __init__(self):
+        pass
     
     def _clean_text(self, text: str) -> str:
         lines = [line.strip() for line in text.split('\n') if line.strip()]
@@ -216,34 +168,31 @@ class TextParser:
             return None, "instructor/litellm არ არის დაყენებული"
         
         cleaned_text = self._clean_text(text)
-        logger.info(f"ტექსტი გასუფთავდა. ორიგინალი: {len(text)}, გასუფთავებული: {len(cleaned_text)} სიმბოლო")
+        logger.info(f"ტექსტი გასუფთავდა: {len(cleaned_text)} სიმბოლო")
         
-        google_config = self.api_vault.get_provider("google")
-        groq_config = self.api_vault.get_provider("groq")
+        # ✅ ვცდილობთ ჯერ Google-ს, მერე Groq-ს
+        for provider in ["google", "groq"]:
+            if vault.get_key(provider):
+                logger.info(f"🤖 ვცდილობ {provider}-ს...")
+                result, msg = await self._try_parse_with_model(provider, cleaned_text)
+                if result:
+                    return result, msg
+                logger.warning(f"{provider} ვერ მოახერხა: {msg}")
         
-        if google_config.get("api_key"):
-            logger.info("ვცდილობ Google Gemini-ს...")
-            result, msg = await self._try_parse_with_model(google_config, cleaned_text)
-            if result: return result, msg
-            logger.warning(f"Google Gemini ვერ მოახერხა: {msg}")
-        
-        if groq_config.get("api_key"):
-            logger.info("ვცდილობ Groq-ს (Llama 3.3)...")
-            result, msg = await self._try_parse_with_model(groq_config, cleaned_text)
-            if result: return result, msg
-            logger.warning(f"Groq ვერ მოახერხა: {msg}")
-        
-        return None, "ვერცერთმა LLM-მა ვერ მოახერხა. შეამოწმეთ ტექსტის ფორმატი."
+        return None, "ვერცერთმა LLM-მა ვერ მოახერხა"
     
-    async def _try_parse_with_model(self, config: Dict, cleaned_text: str) -> Tuple[Optional[ParsedPlayersSchema], str]:
-        model, api_key = config["selected_model"], config["api_key"]
+    async def _try_parse_with_model(self, provider: str, cleaned_text: str) -> Tuple[Optional[ParsedPlayersSchema], str]:
+        api_key = vault.get_key(provider)
+        if not api_key:
+            return None, f"{provider} გასაღები არ არის"
+        
+        model = vault.get_model(provider)
         
         try:
             client = instructor.from_litellm(litellm.acompletion)
             os.environ["GEMINI_API_KEY"] = api_key if "gemini" in model else ""
             os.environ["GROQ_API_KEY"] = api_key if "groq" in model else ""
             
-            # დავამატეთ კონკრეტული მაგალითი (Few-Shot Prompting), რათა AI-მ ზუსტად გაიგოს ფორმატი
             prompt = f"""შენ ხარ ექსპერტი მონაცემთა პარსინგში. ქვემოთ მოცემულია საფეხბურთო გუნდის მოთამაშეების სია, რომელიც დაკოპირებულია ვებგვერდიდან.
 
 შენი ამოცანაა ამოიღო თითოეული მოთამაშის ინფორმაცია და დააბრუნო მკაცრად JSON ფორმატში.
@@ -312,48 +261,41 @@ app = FastAPI()
 
 @app.get("/")
 async def root():
-    return {"message": "FootStats API v2.4 is running!"}
+    return {"message": "FootStats API v3.0 is running!"}
 
 @app.get("/api/vault/status")
 async def get_vault_status():
-    api_vault.load_from_db()
-    return {provider: {"has_key": bool(cfg.get("api_key")), "selected_model": cfg.get("selected_model")} for provider, cfg in api_vault.providers_cache.items()}
+    """იღებს ყველა provider-ის სტატუსს"""
+    return vault.get_all_status()
 
 @app.post("/api/vault/set-key")
 async def set_api_key(request: dict):
     provider = request.get("provider")
     api_key = request.get("api_key")
+    
     if not provider or not api_key:
         return {"success": False, "error": "მონაცემები აკლია"}
     
-    api_vault.set_api_key(provider, api_key)
+    # ✅ ვინახავთ DB-ში და cache-ში
+    success = vault.save_key(provider, api_key)
     
-    try:
-        supabase = get_supabase()
-        if supabase:
-            config = api_vault.get_provider(provider)
-            data = {"provider": provider, "api_key": config["api_key"], "selected_model": config["selected_model"]}
-            existing = supabase.table("api_keys").select("id").eq("provider", provider).execute()
-            if existing.data:
-                supabase.table("api_keys").update(data).eq("provider", provider).execute()
-            else:
-                supabase.table("api_keys").insert(data).execute()
-            logger.info(f"{provider} გასაღები შენახულია Supabase-ში")
-    except Exception as e:
-        logger.error(f"Supabase-ში შენახვის შეცდომა: {e}")
-        
-    return {"success": True, "message": f"{provider} გასაღები შენახულია"}
+    if success:
+        return {"success": True, "message": f"{provider} გასაღები შენახულია"}
+    else:
+        return {"success": False, "error": "შენახვის შეცდომა"}
 
 @app.post("/api/vault/initialize")
 async def initialize_provider(request: dict):
     provider = request.get("provider")
-    if not provider: return {"success": False, "error": "provider აკლია"}
-    config = api_vault.get_provider(provider)
-    return {"success": True, "message": f"{config['name']} მზად არის", "selected_model": config["selected_model"]}
+    if not provider: 
+        return {"success": False, "error": "provider აკლია"}
+    
+    info = vault.get_provider_info(provider)
+    return {"success": True, "message": f"{info.get('name', provider)} მზად არის", "selected_model": info.get("selected_model")}
 
 @app.get("/api/agent/stream-scout")
 async def stream_scout(url: str):
-    scout = TeamScout(api_vault)
+    scout = TeamScout()
     controller = ControllerBot()
     
     async def agent_runner():
@@ -407,7 +349,7 @@ async def stream_scout(url: str):
 
 @app.get("/api/agent/stream-parse-players")
 async def stream_parse_players(text: str):
-    parser = TextParser(api_vault)
+    parser = TextParser()
     
     async def agent_runner():
         yield "data: " + json.dumps({"agent": "TextParser", "message": "🔍 ვიწყებ ჩასმული ტექსტის ანალიზს...", "step": 1, "status": "active"}) + "\n\n"
@@ -441,7 +383,7 @@ async def get_dashboard():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>🤖 FootStats Agent Dashboard v2.4</title>
+        <title>🤖 FootStats Agent Dashboard v3.0</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <style>
             @keyframes pulse-glow { 0%, 100% { box-shadow: 0 0 5px rgba(16, 185, 129, 0.5); } 50% { box-shadow: 0 0 20px rgba(16, 185, 129, 0.8); } }
@@ -458,12 +400,12 @@ async def get_dashboard():
     <body class="bg-gradient-to-br from-[#0B0F19] to-[#1a1f2e] text-[#E2E8F0] font-sans min-h-screen p-6">
         <div class="max-w-6xl mx-auto">
             <div class="text-center mb-8">
-                <h1 class="text-4xl font-bold text-white mb-2">🤖 FootStats Agent Dashboard v2.4</h1>
-                <p class="text-gray-400">Few-Shot Prompting + Smart Text Cleaning</p>
+                <h1 class="text-4xl font-bold text-white mb-2">🤖 FootStats Agent Dashboard v3.0</h1>
+                <p class="text-gray-400">Persistent Vault + Smart Text Cleaning + Few-Shot Prompting</p>
             </div>
 
             <div class="bg-[#0E1424] border-2 border-yellow-600 rounded-xl p-6 mb-8">
-                <h3 class="text-lg font-bold text-yellow-400 mb-4">🔐 API გასაღებების საცავი</h3>
+                <h3 class="text-lg font-bold text-yellow-400 mb-4">🔐 API გასაღებების საცავი (ინახება Supabase-ში სამუდამოდ)</h3>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div class="bg-[#070A13] border border-gray-700 rounded-lg p-4">
                         <div class="flex items-center gap-2 mb-2">
@@ -592,6 +534,9 @@ async def get_dashboard():
                         if (info && info.has_key) {
                             statusEl.innerHTML = '✅ მზად (' + info.selected_model + ')';
                             statusEl.className = 'ml-auto px-2 py-1 bg-emerald-600 rounded text-xs';
+                        } else {
+                            statusEl.innerHTML = '⏸️ არ არის';
+                            statusEl.className = 'ml-auto px-2 py-1 bg-gray-700 rounded text-xs';
                         }
                     }
                 } catch (error) { console.error('Status check error:', error); }
@@ -617,7 +562,7 @@ async def get_dashboard():
                     });
                     const data = await response.json();
                     if (data.success) {
-                        addLog('APIVault', '✅ ' + provider + ' გასაღები შენახულია Supabase-ში', 'success');
+                        addLog('APIVault', '✅ ' + provider + ' გასაღები შენახულია Supabase-ში სამუდამოდ', 'success');
                         document.getElementById(provider + '-status').innerHTML = '✅ შენახულია';
                         document.getElementById(provider + '-status').className = 'ml-auto px-2 py-1 bg-yellow-600 rounded text-xs';
                     } else {
