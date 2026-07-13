@@ -39,14 +39,14 @@ class TeamSchema(BaseModel):
     logo_url: str = Field(default="")
 
 class PlayerSchema(BaseModel):
-    shirt_number: int = Field(default=0)
-    name: str = Field(...)
-    position: str = Field(default="უცნობი")
-    nationality: str = Field(default="უცნობი")
-    birth_date: str = Field(default="უცნობი")
-    age: int = Field(default=0)
-    height_cm: Optional[int] = Field(default=None)
-    weight_kg: Optional[int] = Field(default=None)
+    shirt_number: int = Field(default=0, description="მოთამაშის ნომერი. თუ არ ჩანს, ჩაწერე 0")
+    name: str = Field(..., description="მოთამაშის სრული სახელი და გვარი")
+    position: str = Field(default="უცნობი", description="ამპლუა")
+    nationality: str = Field(default="უცნობი", description="მოქალაქეობა")
+    birth_date: str = Field(default="უცნობი", description="დაბადების თარიღი DD.MM.YYYY")
+    age: int = Field(default=0, description="ასაკი (მხოლოდ რიცხვი)")
+    height_cm: Optional[int] = Field(default=None, description="სიმაღლე სმ-ში. თუ არ არის, ჩაწერე null")
+    weight_kg: Optional[int] = Field(default=None, description="წონა კგ-ში. თუ არ არის, ჩაწერე null")
 
 class SquadSchema(BaseModel):
     team_name: str = Field(default="უცნობი გუნდი")
@@ -79,13 +79,11 @@ class APIVault:
         }
     
     def load_from_db(self):
-        """ტვირთავს გასაღებებს Supabase-დან ყოველ ჯერზე"""
         try:
             supabase = get_supabase()
             if not supabase:
                 logger.warning("Supabase არ არის ხელმისაწვდომი")
                 return False
-            
             try:
                 response = supabase.table("api_keys").select("*").execute()
                 for row in response.data:
@@ -192,6 +190,11 @@ class TextParser:
     def __init__(self, api_vault: APIVault):
         self.api_vault = api_vault
     
+    def _clean_text(self, text: str) -> str:
+        """შლის ზედმეტ ცარიელ ხაზებს, რათა AI-მა უკეთ წაიკითხოს"""
+        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        return '\n'.join(lines)
+    
     def parse_team_from_text(self, text: str) -> Dict:
         team_data = {"name": "", "short_code": "", "city": "", "country": "", "stadium": "", "coach": "", "logo_url": ""}
         lines = text.strip().split('\n')
@@ -213,28 +216,27 @@ class TextParser:
         if not HAS_INSTRUCTOR:
             return None, "instructor/litellm არ არის დაყენებული"
         
+        cleaned_text = self._clean_text(text)
+        logger.info(f"ტექსტი გასუფთავდა. ორიგინალი: {len(text)}, გასუფთავებული: {len(cleaned_text)} სიმბოლო")
+        
         google_config = self.api_vault.get_provider("google")
         groq_config = self.api_vault.get_provider("groq")
         
         if google_config.get("api_key"):
             logger.info("ვცდილობ Google Gemini-ს...")
-            result, msg = await self._try_parse_with_model(google_config, text)
-            if result:
-                return result, msg
-            else:
-                logger.warning(f"Google Gemini ვერ მოახერხა: {msg}")
+            result, msg = await self._try_parse_with_model(google_config, cleaned_text)
+            if result: return result, msg
+            logger.warning(f"Google Gemini ვერ მოახერხა: {msg}")
         
         if groq_config.get("api_key"):
             logger.info("ვცდილობ Groq-ს (Llama 3.3)...")
-            result, msg = await self._try_parse_with_model(groq_config, text)
-            if result:
-                return result, msg
-            else:
-                logger.warning(f"Groq ვერ მოახერხა: {msg}")
+            result, msg = await self._try_parse_with_model(groq_config, cleaned_text)
+            if result: return result, msg
+            logger.warning(f"Groq ვერ მოახერხა: {msg}")
         
-        return None, "ვერცერთმა LLM-მა ვერ მოახერხა ტექსტის დამუშავება"
+        return None, "ვერცერთმა LLM-მა ვერ მოახერხა. შეამოწმეთ ტექსტის ფორმატი."
     
-    async def _try_parse_with_model(self, config: Dict, text: str) -> Tuple[Optional[ParsedPlayersSchema], str]:
+    async def _try_parse_with_model(self, config: Dict, cleaned_text: str) -> Tuple[Optional[ParsedPlayersSchema], str]:
         model, api_key = config["selected_model"], config["api_key"]
         
         try:
@@ -242,43 +244,40 @@ class TextParser:
             os.environ["GEMINI_API_KEY"] = api_key if "gemini" in model else ""
             os.environ["GROQ_API_KEY"] = api_key if "groq" in model else ""
             
+            prompt = f"""შენ ხარ ექსპერტი მონაცემთა პარსინგში. ქვემოთ მოცემულია საფეხბურთო გუნდის მოთამაშეების სია, რომელიც დაკოპირებულია ვებგვერდიდან და არის არეული ფორმატით.
+
+შენი ამოცანაა ამოიღო თითოეული მოთამაშის ინფორმაცია და დააბრუნო მკაცრად JSON ფორმატში.
+
+წესები ველების ამოსაცნობად:
+- shirt_number: ნომერი (რიცხვი). თუ არ ჩანს, ჩაწერე 0.
+- name: მოთამაშის სრული სახელი და გვარი.
+- position: ამპლუა (вратарь, защитник, полузащитник, нападающий).
+- nationality: ქვეყანა (მაგ: Испания, Англия).
+- birth_date: თარიღი ფორმატით DD.MM.YYYY.
+- age: ასაკი (მხოლოდ რიცხვი).
+- height_cm: სიმაღლე სმ-ში (მხოლოდ რიცხვი). თუ არ არის, ჩაწერე null.
+- weight_kg: წონა კგ-ში (მხოლოდ რიცხვი). თუ არ არის, ჩაწერე null.
+
+ტექსტი:
+{cleaned_text}"""
+
             result = await client.chat.completions.create(
                 model=model,
                 response_model=ParsedPlayersSchema,
                 max_retries=3,
                 messages=[
-                    {
-                        "role": "system", 
-                        "content": """შენ ხარ ექსპერტი მონაცემთა პარსინგში. შენი ამოცანაა არასტრუქტურირებული ტექსტიდან ამოიღო მოთამაშეების ინფორმაცია და დააბრუნო სტრუქტურირებული JSON ფორმატში.
-
-მნიშვნელოვანი წესები:
-- shirt_number: მოთამაშის ნომერი (რიცხვი)
-- name: სრული სახელი და გვარი
-- position: ამპლუა (вратарь=მეკარე, защитник=მცველი, полузащитник=ნახევარმცველი, нападающий=თავდამსხმელი)
-- nationality: მოქალაქეობა
-- birth_date: დაბადების თარიღი DD.MM.YYYY
-- age: ასაკი (რიცხვი)
-- height_cm: სიმაღლე სმ-ში (რიცხვი)
-- weight_kg: წონა კგ-ში (რიცხვი)
-
-თუ რაიმე ველი არ არის მითითებული, გამოიყენე null ან დეფოლტ მნიშვნელობა."""
-                    },
-                    {
-                        "role": "user", 
-                        "content": f"გადაამუშავე ეს ტექსტი და ამოიღე ყველა მოთამაშის ინფორმაცია:\n\n{text}"
-                    }
+                    {"role": "system", "content": "შენ ხარ მკაცრი JSON პარსერი. არ დაამატო markdown ან ტექსტი, მხოლოდ JSON."},
+                    {"role": "user", "content": prompt}
                 ]
             )
             
             logger.success(f"{model}-მა წარმატებით დაპარსა {len(result.players)} მოთამაშე")
             return result, "წარმატება"
             
-        except IndexError:
-            logger.error(f"{model}-მა ვერ შექმნა ვალიდური მონაცემთა სია")
-            return None, f"{model}-მა ვერ შექმნა ვალიდური მონაცემთა სია"
         except Exception as e:
-            logger.error(f"{model} პარსინგის შეცდომა: {type(e).__name__} - {str(e)}")
-            return None, f"{model} შეცდომა: {str(e)}"
+            error_details = str(e)
+            logger.error(f"{model} პარსინგის შეცდომა: {type(e).__name__} - {error_details}")
+            return None, f"{model} შეცდომა: {error_details[:150]}..."
 
 class ControllerBot:
     def validate_team(self, team_data: Dict) -> Tuple[bool, List[str]]:
@@ -294,11 +293,10 @@ app = FastAPI()
 
 @app.get("/")
 async def root():
-    return {"message": "FootStats API v2.2 is running!"}
+    return {"message": "FootStats API v2.3 is running!"}
 
 @app.get("/api/vault/status")
 async def get_vault_status():
-    """ყოველ ჯერზე ტვირთავს გასაღებებს DB-დან"""
     api_vault.load_from_db()
     return {provider: {"has_key": bool(cfg.get("api_key")), "selected_model": cfg.get("selected_model")} for provider, cfg in api_vault.providers_cache.items()}
 
@@ -399,8 +397,10 @@ async def stream_parse_players(text: str):
         yield "data: " + json.dumps({"agent": "TextParser", "message": f"📄 მიღებულია ტექსტი: {len(text)} სიმბოლო", "step": 1, "status": "active"}) + "\n\n"
         await asyncio.sleep(0.3)
         
+        yield "data: " + json.dumps({"agent": "TextParser", "message": "🧹 ვასუფთავებ ტექსტს ზედმეტი ცარიელი ხაზებისგან...", "step": 1, "status": "active"}) + "\n\n"
+        await asyncio.sleep(0.3)
+        
         yield "data: " + json.dumps({"agent": "TextParser", "message": "🤖 ვცდილობ AI მოდელებს (Google Gemini → Groq fallback)...", "step": 1, "status": "active"}) + "\n\n"
-        yield "data: " + json.dumps({"agent": "TextParser", "message": "💡 AI მხოლოდ ფორმატის გადაყვანას აკეთებს, არა მონაცემების მოგონებას", "step": 1, "status": "active"}) + "\n\n"
         await asyncio.sleep(0.5)
         
         result, msg = await parser.parse_players_from_text(text)
@@ -422,7 +422,7 @@ async def get_dashboard():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>🤖 FootStats Agent Dashboard v2.2</title>
+        <title>🤖 FootStats Agent Dashboard v2.3</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <style>
             @keyframes pulse-glow { 0%, 100% { box-shadow: 0 0 5px rgba(16, 185, 129, 0.5); } 50% { box-shadow: 0 0 20px rgba(16, 185, 129, 0.8); } }
@@ -439,8 +439,8 @@ async def get_dashboard():
     <body class="bg-gradient-to-br from-[#0B0F19] to-[#1a1f2e] text-[#E2E8F0] font-sans min-h-screen p-6">
         <div class="max-w-6xl mx-auto">
             <div class="text-center mb-8">
-                <h1 class="text-4xl font-bold text-white mb-2">🤖 FootStats Agent Dashboard v2.2</h1>
-                <p class="text-gray-400">Universal Parser + AI Structuring with Fallback</p>
+                <h1 class="text-4xl font-bold text-white mb-2">🤖 FootStats Agent Dashboard v2.3</h1>
+                <p class="text-gray-400">Smart Text Cleaning + AI Structuring</p>
             </div>
 
             <div class="bg-[#0E1424] border-2 border-yellow-600 rounded-xl p-6 mb-8">
@@ -487,10 +487,10 @@ async def get_dashboard():
                     <p class="text-emerald-300 font-semibold mb-1">📖 როგორ გამოვიყენოთ:</p>
                     <ol class="text-gray-300 space-y-1 ml-4 list-decimal">
                         <li>გახსენი championat.com-ზე გუნდის გვერდი</li>
-                        <li>მონიშნე მოთამაშეების ცხრილი</li>
+                        <li>მონიშნე მთლიანი მოთამაშეების ცხრილი</li>
                         <li>დააკოპირე (Ctrl+C)</li>
                         <li>ჩასვი ქვემოთ (Ctrl+V)</li>
-                        <li>AI გადაიყვანს სტრუქტურირებულ JSON-ში</li>
+                        <li>სისტემა ავტომატურად გაასუფთავებს და AI გადაიყვანს JSON-ში</li>
                     </ol>
                 </div>
                 <textarea id="pasteText" rows="12" placeholder="ჩასვი აქ championat.com-დან დაკოპირებული ტექსტი..." class="w-full bg-[#0B0F19] border border-gray-700 rounded-lg p-3 text-purple-400 font-mono text-xs resize-none focus:outline-none focus:border-emerald-500"></textarea>
