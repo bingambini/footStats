@@ -10,7 +10,6 @@ import httpx
 from bs4 import BeautifulSoup
 from loguru import logger
 
-# ახალი ბიბლიოთეკები
 try:
     from curl_cffi import requests as cffi_requests
     HAS_CURL_CFFI = True
@@ -26,15 +25,9 @@ except ImportError:
     HAS_INSTRUCTOR = False
     logger.warning("instructor/litellm არ არის დაყენებული")
 
-# ============================================
-# Logger Setup
-# ============================================
-logger.remove() # წინა ლოგერის გასუფთავება
+logger.remove()
 logger.add(lambda msg: print(msg.strip()), format="<green>{time:HH:mm:ss}</green> | <level>{level}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan> - <level>{message}</level>")
 
-# ============================================
-# Pydantic Models (Strict Validation)
-# ============================================
 class TeamSchema(BaseModel):
     name: str = Field(..., min_length=2, max_length=100, description="გუნდის ოფიციალური სახელი")
     short_code: str = Field(..., pattern=r"^[A-Z]{3,5}$", description="გუნდის მოკლე კოდი, 3-5 დიდი ასო")
@@ -44,9 +37,6 @@ class TeamSchema(BaseModel):
     coach: str = Field(default="", description="მთავარი მწვრთნელის სახელი და გვარი")
     logo_url: str = Field(default="", description="გუნდის ლოგოს სრული URL")
 
-# ============================================
-# Supabase Client (Lazy Loading)
-# ============================================
 _supabase_client = None
 
 def get_supabase():
@@ -63,9 +53,6 @@ def get_supabase():
             logger.error(f"Supabase ინიციალიზაციის შეცდომა: {e}")
     return _supabase_client
 
-# ============================================
-# API Vault
-# ============================================
 class APIVault:
     def __init__(self):
         self.providers_cache = {
@@ -73,13 +60,13 @@ class APIVault:
                 "name": "Google Gemini",
                 "api_key": None,
                 "available_models": ["gemini-2.5-flash", "gemini-2.0-flash"],
-                "selected_model": "gemini/gemini-2.5-flash" # litellm format
+                "selected_model": "gemini/gemini-2.5-flash"
             },
             "groq": {
                 "name": "Groq",
                 "api_key": None,
                 "available_models": ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"],
-                "selected_model": "groq/llama-3.3-70b-versatile" # litellm format
+                "selected_model": "groq/llama-3.3-70b-versatile"
             }
         }
         self.load_from_db()
@@ -90,7 +77,6 @@ class APIVault:
             if not supabase:
                 logger.warning("Supabase არ არის ხელმისაწვდომი, გამოიყენება default კონფიგურაცია")
                 return
-            
             response = supabase.table("api_keys").select("*").execute()
             for row in response.data:
                 provider = row["provider"]
@@ -104,22 +90,14 @@ class APIVault:
     def save_to_db(self, provider: str) -> Tuple[bool, str]:
         try:
             supabase = get_supabase()
-            if not supabase:
-                return False, "Supabase არ არის"
-            
+            if not supabase: return False, "Supabase არ არის"
             config = self.providers_cache[provider]
-            data = {
-                "provider": provider,
-                "api_key": config["api_key"],
-                "selected_model": config["selected_model"]
-            }
-            
+            data = {"provider": provider, "api_key": config["api_key"], "selected_model": config["selected_model"]}
             existing = supabase.table("api_keys").select("id").eq("provider", provider).execute()
             if existing.data:
                 supabase.table("api_keys").update(data).eq("provider", provider).execute()
             else:
                 supabase.table("api_keys").insert(data).execute()
-            
             logger.info(f"{provider} შენახულია DB-ში")
             return True, "წარმატება"
         except Exception as e:
@@ -135,9 +113,6 @@ class APIVault:
 
 api_vault = APIVault()
 
-# ============================================
-# TeamScout Bot
-# ============================================
 class TeamScout:
     def __init__(self, api_vault: APIVault):
         self.api_vault = api_vault
@@ -163,8 +138,6 @@ class TeamScout:
 
     async def fetch_page_direct(self, url: str) -> Tuple[Optional[str], str]:
         logger.info("ვიწყებ პირდაპირ scraping-ს...")
-        
-        # მცდელობა 1: curl-cffi (Browser Impersonation)
         if HAS_CURL_CFFI:
             try:
                 logger.info("ვიყენებ curl-cffi (Chrome 120 impersonation)")
@@ -176,8 +149,6 @@ class TeamScout:
                     logger.warning(f"curl-cffi ვერ მოახერხა: {response.status_code}")
             except Exception as e:
                 logger.error(f"curl-cffi შეცდომა: {e}")
-        
-        # მცდელობა 2: httpx fallback
         try:
             logger.info("ვიყენებ httpx fallback-ს")
             async with httpx.AsyncClient(follow_redirects=True, timeout=30.0, verify=False) as client:
@@ -187,14 +158,12 @@ class TeamScout:
                     return response.text, "httpx წარმატება"
         except Exception as e:
             logger.error(f"httpx შეცდომა: {e}")
-            
         return None, "ყველა scraping მეთოდი წარუმატებელია"
     
     def parse_html(self, html: str) -> Dict:
         logger.info("ვიწყებ HTML პარსინგს BeautifulSoup-ით...")
         soup = BeautifulSoup(html, 'lxml')
         team_data = {"name": "", "short_code": "", "city": "", "country": "", "stadium": "", "coach": "", "logo_url": ""}
-        
         h1_tags = soup.find_all('h1')
         for h1 in h1_tags:
             text = h1.get_text(strip=True)
@@ -209,11 +178,9 @@ class TeamScout:
                             team_data["city"] = parts[0].strip()
                             team_data["country"] = parts[1].strip()
                         break
-        
         og_image = soup.find('meta', property='og:image')
         if og_image: team_data["logo_url"] = og_image.get('content', '')
         if team_data["name"]: team_data["short_code"] = team_data["name"][:3].upper()
-        
         logger.info(f"HTML პარსინგის შედეგი: {team_data}")
         return team_data
 
@@ -230,43 +197,35 @@ class TeamScout:
 
         model = config["selected_model"]
         api_key = config["api_key"]
-        
         logger.info(f"ვიწყებ AI ძიებას გუნდზე: {team_name} (მოდელი: {model})")
         
         try:
-            # instructor + litellm ინტეგრაცია გარანტირებული JSON-ისთვის
-            client = instructor.from_litellm(litellm.completion)
+            # ✅ აქ არის გამოსწორება: litellm.acompletion (ასინქრონული)
+            client = instructor.from_litellm(litellm.acompletion)
             
-            # litellm-ს სჭირდება api_key გარემოს ცვლადში ან პარამეტრად
             os.environ["GEMINI_API_KEY"] = api_key if "gemini" in model else ""
             os.environ["GROQ_API_KEY"] = api_key if "groq" in model else ""
 
             team = await client.chat.completions.create(
                 model=model,
                 response_model=TeamSchema,
-                max_retries=2, # ავტომატური გასწორება თუ JSON არასწორია
+                max_retries=2,
                 messages=[
                     {"role": "system", "content": "შენ ხარ ექსპერტი საფეხბურთო მონაცემებში. შენი ამოცანაა ზუსტი ინფორმაციის მოძიება."},
                     {"role": "user", "content": f"მოიძიე ოფიციალური ინფორმაცია საფეხბურთო გუნდზე: {team_name}. დააბრუნე მხოლოდ JSON სქემის მიხედვით."}
                 ]
             )
-            
             logger.success(f"AI-მ წარმატებით დააბრუნა სტრუქტურირებული მონაცემები: {team.name}")
             return team, "AI წარმატება"
-            
         except Exception as e:
             logger.error(f"AI ძიების შეცდომა: {e}")
             return None, f"AI შეცდომა: {str(e)}"
 
-# ============================================
-# TextParser & Controller Bots
-# ============================================
 class TextParser:
     def parse_team_from_text(self, text: str) -> Dict:
         team_data = {"name": "", "short_code": "", "city": "", "country": "", "stadium": "", "coach": "", "logo_url": ""}
         lines = text.strip().split('\n')
         if lines: team_data["name"] = lines[0].strip()
-        
         for i, line in enumerate(lines):
             if 'Город, страна' in line and i + 1 < len(lines):
                 location = lines[i + 1].strip()
@@ -277,7 +236,6 @@ class TextParser:
                 team_data["stadium"] = lines[i + 1].strip()
             elif 'Тренер' in line and i + 1 < len(lines):
                 team_data["coach"] = lines[i + 1].strip()
-        
         if team_data["name"]: team_data["short_code"] = team_data["name"][:3].upper()
         return {"success": True, "data": team_data, "players_count": 0}
 
@@ -288,9 +246,6 @@ class ControllerBot:
         if not team_data.get("short_code"): errors.append("მოკლე კოდი აუცილებელია")
         return len(errors) == 0, errors
 
-# ============================================
-# FastAPI App & Endpoints
-# ============================================
 app = FastAPI()
 
 @app.get("/")
@@ -324,7 +279,6 @@ async def parse_text(request: dict):
 
 @app.get("/admin/scout", response_class=HTMLResponse)
 async def get_dashboard():
-    # იგივე HTML UI, ოღონდ განახლებული ლოგების ფერებით და სტილით
     html_content = """
     <!DOCTYPE html>
     <html lang="ka">
@@ -351,7 +305,6 @@ async def get_dashboard():
                 <h1 class="text-4xl font-bold text-white mb-2">🤖 FootStats Agent Dashboard v2</h1>
                 <p class="text-gray-400">Bulletproof Architecture (curl-cffi + instructor + litellm)</p>
             </div>
-
             <div class="bg-[#0E1424] border-2 border-yellow-600 rounded-xl p-6 mb-8">
                 <h3 class="text-lg font-bold text-yellow-400 mb-4">🔐 API გასაღებების საცავი</h3>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -375,12 +328,10 @@ async def get_dashboard():
                     </div>
                 </div>
             </div>
-
             <div class="flex gap-2 mb-4">
                 <button onclick="switchTab('url')" id="tab-url" class="tab-active px-6 py-3 rounded-lg font-semibold">🔗 URL-დან</button>
                 <button onclick="switchTab('paste')" id="tab-paste" class="tab-inactive px-6 py-3 rounded-lg font-semibold">📋 ტექსტის ჩასმა</button>
             </div>
-
             <div id="section-url" class="bg-[#0E1424] border border-gray-800 rounded-xl p-6 mb-8">
                 <h3 class="text-lg font-bold text-white mb-4">🎯 გუნდის URL</h3>
                 <div class="flex gap-3">
@@ -388,13 +339,11 @@ async def get_dashboard():
                     <button onclick="startScouting()" id="startBtn" class="bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-3 rounded-lg font-semibold">🚀 გააქტიურე</button>
                 </div>
             </div>
-
             <div id="section-paste" class="hidden bg-[#0E1424] border border-gray-800 rounded-xl p-6 mb-8">
                 <h3 class="text-lg font-bold text-white mb-4">📋 ჩაფეისთე ტექსტი</h3>
                 <textarea id="pasteText" rows="6" placeholder="დააკოპირე გვერდის ტექსტი..." class="w-full bg-[#070A13] border border-gray-700 rounded-lg p-3 text-purple-400 font-mono text-sm resize-none"></textarea>
                 <button onclick="startParsing()" id="parseBtn" class="mt-4 bg-purple-600 hover:bg-purple-500 text-white px-6 py-3 rounded-lg font-semibold w-full">📝 დაამუშავე</button>
             </div>
-
             <div class="bg-[#0E1424] border border-gray-800 rounded-xl p-6 mb-8">
                 <h3 class="text-lg font-bold text-white mb-4">📋 პროცესის ნაბიჯები</h3>
                 <div class="space-y-3">
@@ -421,7 +370,6 @@ async def get_dashboard():
                     </div>
                 </div>
             </div>
-
             <div id="data-display" class="hidden bg-[#0E1424] border border-gray-800 rounded-xl p-6 mb-8">
                 <h3 class="text-lg font-bold text-white mb-4">📊 მოპოვებული მონაცემები</h3>
                 <div id="team-data" class="grid grid-cols-1 md:grid-cols-2 gap-4"></div>
@@ -430,7 +378,6 @@ async def get_dashboard():
                     <button onclick="rejectData()" class="flex-1 bg-red-600 hover:bg-red-500 text-white px-6 py-3 rounded-lg font-semibold">❌ უარყოფა</button>
                 </div>
             </div>
-
             <div class="bg-[#0E1424] border border-gray-800 rounded-xl p-6">
                 <div class="flex items-center justify-between mb-4">
                     <h3 class="text-lg font-bold text-white">📜 ლაივ ლოგები</h3>
@@ -441,10 +388,8 @@ async def get_dashboard():
                 </div>
             </div>
         </div>
-
         <script>
             let currentTeamData = null;
-
             window.addEventListener('DOMContentLoaded', async () => {
                 try {
                     const response = await fetch('/api/vault/status');
@@ -462,14 +407,12 @@ async def get_dashboard():
                     }
                 } catch (error) { console.error('Status check error:', error); }
             });
-
             function switchTab(mode) {
                 document.getElementById('tab-url').className = mode === 'url' ? 'tab-active px-6 py-3 rounded-lg font-semibold' : 'tab-inactive px-6 py-3 rounded-lg font-semibold';
                 document.getElementById('tab-paste').className = mode === 'paste' ? 'tab-active px-6 py-3 rounded-lg font-semibold' : 'tab-inactive px-6 py-3 rounded-lg font-semibold';
                 document.getElementById('section-url').classList.toggle('hidden', mode !== 'url');
                 document.getElementById('section-paste').classList.toggle('hidden', mode !== 'paste');
             }
-
             async function setKey(provider) {
                 const apiKey = document.getElementById(`${provider}-key`).value;
                 if (!apiKey) { alert('ჩაწერე გასაღები'); return; }
@@ -489,7 +432,6 @@ async def get_dashboard():
                     }
                 } catch (error) { addLog('APIVault', `❌ ${error.message}`, 'error'); }
             }
-
             async function initializeProvider(provider) {
                 addLog('APIVault', `🚀 ${provider} ინიციალიზაცია...`, 'info');
                 try {
@@ -507,7 +449,6 @@ async def get_dashboard():
                     }
                 } catch (error) { addLog('APIVault', `❌ ${error.message}`, 'error'); }
             }
-
             function startScouting() {
                 const url = document.getElementById('targetUrl').value;
                 const startBtn = document.getElementById('startBtn');
@@ -532,7 +473,6 @@ async def get_dashboard():
                     eventSource.close(); startBtn.disabled = false; startBtn.textContent = '🚀 გააქტიურე';
                 };
             }
-
             function startParsing() {
                 const text = document.getElementById('pasteText').value;
                 const parseBtn = document.getElementById('parseBtn');
@@ -559,7 +499,6 @@ async def get_dashboard():
                     parseBtn.disabled = false; parseBtn.textContent = '📝 დაამუშავე';
                 });
             }
-
             function displayTeamData(teamData) {
                 document.getElementById('data-display').classList.remove('hidden');
                 const fields = [
@@ -578,17 +517,14 @@ async def get_dashboard():
                     </div>
                 `).join('');
             }
-
             function confirmData() {
                 addLog('system', '✅ მონაცემები დადასტურდა', 'success');
                 document.getElementById('data-display').classList.add('hidden');
             }
-
             function rejectData() {
                 addLog('system', '❌ უარყოფილია', 'error');
                 document.getElementById('data-display').classList.add('hidden');
             }
-
             function resetUI() {
                 document.getElementById('terminal').innerHTML = '';
                 document.getElementById('data-display').classList.add('hidden');
@@ -597,14 +533,12 @@ async def get_dashboard():
                     document.getElementById(`step-${i}-status`).textContent = '⏸️';
                 }
             }
-
             function handleAgentMessage(data) {
                 const { agent, message, step, status } = data;
                 const logType = message.includes('❌') ? 'error' : message.includes('✅') ? 'success' : 'info';
                 addLog(agent, message, logType);
                 if (step) updateStep(step, status);
             }
-
             function updateStep(stepNum, status) {
                 const step = document.getElementById(`step-${stepNum}`);
                 const statusEl = document.getElementById(`step-${stepNum}-status`);
@@ -619,7 +553,6 @@ async def get_dashboard():
                     statusEl.textContent = '❌';
                 }
             }
-
             function addLog(agent, message, type = 'info') {
                 const terminal = document.getElementById('terminal');
                 const log = document.createElement('div');
@@ -631,7 +564,6 @@ async def get_dashboard():
                 terminal.appendChild(log);
                 terminal.scrollTop = terminal.scrollHeight;
             }
-
             function clearLogs() {
                 document.getElementById('terminal').innerHTML = '<div class="text-gray-500">// გასუფთავდა</div>';
             }
@@ -653,7 +585,6 @@ async def stream_scout(url: str):
         normalized_url = scout.normalize_url(url)
         yield "data: " + json.dumps({"agent": "TeamScout", "message": f"🔗 ნორმალიზებული URL: {normalized_url}", "step": 1, "status": "active"}) + "\n\n"
         
-        # ნაბიჯი 1: Scraping
         yield "data: " + json.dumps({"agent": "TeamScout", "message": "🌐 მცდელობა 1: პირდაპირი scraping...", "step": 1, "status": "active"}) + "\n\n"
         if HAS_CURL_CFFI:
             yield "data: " + json.dumps({"agent": "TeamScout", "message": "🛡️ ვიყენებ curl-cffi (Chrome 120 impersonation)", "step": 1, "status": "active"}) + "\n\n"
@@ -672,7 +603,6 @@ async def stream_scout(url: str):
         else:
             yield "data: " + json.dumps({"agent": "TeamScout", "message": f"❌ Scraping წარუმატებელი: {direct_msg}", "step": 1, "status": "error"}) + "\n\n"
         
-        # ნაბიჯი 2: AI Fallback
         if not team_data or not team_data["name"]:
             yield "data: " + json.dumps({"agent": "TeamScout", "message": "🤖 მცდელობა 2: AI ძიება (instructor + litellm)", "step": 1, "status": "active"}) + "\n\n"
             team_name = scout.extract_team_from_url(url)
@@ -692,7 +622,6 @@ async def stream_scout(url: str):
             yield "data: " + json.dumps({"agent": "TeamScout", "message": "❌ მონაცემები ვერ მოიპოვა", "step": 1, "status": "error", "done": True}) + "\n\n"
             return
         
-        # ნაბიჯი 3: Validation
         yield "data: " + json.dumps({"agent": "Controller", "message": "🔍 ვიწყებ Pydantic ვალიდაციას...", "step": 2, "status": "active"}) + "\n\n"
         await asyncio.sleep(0.5)
         
