@@ -41,10 +41,10 @@ class TeamSchema(BaseModel):
 class PlayerSchema(BaseModel):
     shirt_number: int = Field(default=0, description="მოთამაშის ნომერი. თუ არ ჩანს, ჩაწერე 0")
     name: str = Field(..., description="მოთამაშის სრული სახელი და გვარი")
-    position: str = Field(default="უცნობი", description="ამპლუა")
+    position: str = Field(default="უცნობი", description="ამპლუა (вратарь, защитник, полузащитник, нападающий)")
     nationality: str = Field(default="უცნობი", description="მოქალაქეობა")
     birth_date: str = Field(default="უცნობი", description="დაბადების თარიღი DD.MM.YYYY")
-    age: int = Field(default=0, description="ასაკი (მხოლოდ რიცხვი)")
+    age: int = Field(default=0, description="ასაკი (მხოლოდ რიცხვი). გამოთვალე თარიღიდან ან ჩაწერე 0")
     height_cm: Optional[int] = Field(default=None, description="სიმაღლე სმ-ში. თუ არ არის, ჩაწერე null")
     weight_kg: Optional[int] = Field(default=None, description="წონა კგ-ში. თუ არ არის, ჩაწერე null")
 
@@ -191,7 +191,6 @@ class TextParser:
         self.api_vault = api_vault
     
     def _clean_text(self, text: str) -> str:
-        """შლის ზედმეტ ცარიელ ხაზებს, რათა AI-მა უკეთ წაიკითხოს"""
         lines = [line.strip() for line in text.split('\n') if line.strip()]
         return '\n'.join(lines)
     
@@ -244,21 +243,41 @@ class TextParser:
             os.environ["GEMINI_API_KEY"] = api_key if "gemini" in model else ""
             os.environ["GROQ_API_KEY"] = api_key if "groq" in model else ""
             
-            prompt = f"""შენ ხარ ექსპერტი მონაცემთა პარსინგში. ქვემოთ მოცემულია საფეხბურთო გუნდის მოთამაშეების სია, რომელიც დაკოპირებულია ვებგვერდიდან და არის არეული ფორმატით.
+            # დავამატეთ კონკრეტული მაგალითი (Few-Shot Prompting), რათა AI-მ ზუსტად გაიგოს ფორმატი
+            prompt = f"""შენ ხარ ექსპერტი მონაცემთა პარსინგში. ქვემოთ მოცემულია საფეხბურთო გუნდის მოთამაშეების სია, რომელიც დაკოპირებულია ვებგვერდიდან.
 
 შენი ამოცანაა ამოიღო თითოეული მოთამაშის ინფორმაცია და დააბრუნო მკაცრად JSON ფორმატში.
 
-წესები ველების ამოსაცნობად:
-- shirt_number: ნომერი (რიცხვი). თუ არ ჩანს, ჩაწერე 0.
+მაგალითი, თუ როგორ უნდა გარდაქმნა არეული ტექსტი JSON-ად:
+შემავალი ტექსტი:
+13
+Испания
+Кепа Аррисабалага Ревуэльта
+вратарь 03.10.1994 186 81
+
+სწორი JSON გამომავალი ამ მოთამაშისთვის:
+{{
+  "shirt_number": 13,
+  "name": "Кепа Аррисабалага Ревуэльта",
+  "position": "вратарь",
+  "nationality": "Испания",
+  "birth_date": "03.10.1994",
+  "age": 30,
+  "height_cm": 186,
+  "weight_kg": 81
+}}
+
+წესები:
+- shirt_number: მხოლოდ რიცხვი. თუ არ ჩანს, ჩაწერე 0.
 - name: მოთამაშის სრული სახელი და გვარი.
 - position: ამპლუა (вратарь, защитник, полузащитник, нападающий).
 - nationality: ქვეყანა (მაგ: Испания, Англия).
 - birth_date: თარიღი ფორმატით DD.MM.YYYY.
-- age: ასაკი (მხოლოდ რიცხვი).
+- age: ასაკი (მხოლოდ რიცხვი). გამოთვალე თარიღიდან ან ჩაწერე 0.
 - height_cm: სიმაღლე სმ-ში (მხოლოდ რიცხვი). თუ არ არის, ჩაწერე null.
 - weight_kg: წონა კგ-ში (მხოლოდ რიცხვი). თუ არ არის, ჩაწერე null.
 
-ტექსტი:
+დაასრულე შემდეგი ტექსტის დამუშავება ზუსტად ამ მაგალითის მიხედვით:
 {cleaned_text}"""
 
             result = await client.chat.completions.create(
@@ -277,7 +296,7 @@ class TextParser:
         except Exception as e:
             error_details = str(e)
             logger.error(f"{model} პარსინგის შეცდომა: {type(e).__name__} - {error_details}")
-            return None, f"{model} შეცდომა: {error_details[:150]}..."
+            return None, f"{model} შეცდომა: {error_details[:200]}..."
 
 class ControllerBot:
     def validate_team(self, team_data: Dict) -> Tuple[bool, List[str]]:
@@ -293,7 +312,7 @@ app = FastAPI()
 
 @app.get("/")
 async def root():
-    return {"message": "FootStats API v2.3 is running!"}
+    return {"message": "FootStats API v2.4 is running!"}
 
 @app.get("/api/vault/status")
 async def get_vault_status():
@@ -422,7 +441,7 @@ async def get_dashboard():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>🤖 FootStats Agent Dashboard v2.3</title>
+        <title>🤖 FootStats Agent Dashboard v2.4</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <style>
             @keyframes pulse-glow { 0%, 100% { box-shadow: 0 0 5px rgba(16, 185, 129, 0.5); } 50% { box-shadow: 0 0 20px rgba(16, 185, 129, 0.8); } }
@@ -439,8 +458,8 @@ async def get_dashboard():
     <body class="bg-gradient-to-br from-[#0B0F19] to-[#1a1f2e] text-[#E2E8F0] font-sans min-h-screen p-6">
         <div class="max-w-6xl mx-auto">
             <div class="text-center mb-8">
-                <h1 class="text-4xl font-bold text-white mb-2">🤖 FootStats Agent Dashboard v2.3</h1>
-                <p class="text-gray-400">Smart Text Cleaning + AI Structuring</p>
+                <h1 class="text-4xl font-bold text-white mb-2">🤖 FootStats Agent Dashboard v2.4</h1>
+                <p class="text-gray-400">Few-Shot Prompting + Smart Text Cleaning</p>
             </div>
 
             <div class="bg-[#0E1424] border-2 border-yellow-600 rounded-xl p-6 mb-8">
