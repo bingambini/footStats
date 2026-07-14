@@ -16,7 +16,7 @@ try:
 except ImportError:
     HAS_SUPABASE = False
 
-app = FastAPI(title="FootStats API v3.0")
+app = FastAPI(title="FootStats API v4.0")
 
 # ==========================================
 # Logger Setup
@@ -34,17 +34,16 @@ def get_supabase():
     if _supabase_client is None:
         try:
             url = os.environ.get("SUPABASE_URL")
-            # მნიშვნელოვანი გამოსწორება: ვამოწმებთ ორივე შესაძლო სახელს
-            key = os.environ.get("SUPABASE_KEY") or os.environ.get("SUPABASE_ANON_KEY")
+            key = os.environ.get("SUPABASE_ANON_KEY") or os.environ.get("SUPABASE_KEY")
             
             logger.info(f"🔍 SUPABASE_URL: {'SET' if url else 'NOT SET'}")
-            logger.info(f"🔍 SUPABASE_KEY/ANON_KEY: {'SET' if key else 'NOT SET'}")
+            logger.info(f"🔍 SUPABASE_KEY: {'SET' if key else 'NOT SET'}")
             
             if url and key:
                 _supabase_client = create_client(url, key)
                 logger.info("✅ Supabase კლიენტი წარმატებით ინიციალიზდა")
             else:
-                logger.error("❌ SUPABASE_URL ან SUPABASE_KEY/SUPABASE_ANON_KEY არ არის დაყენებული!")
+                logger.error("❌ SUPABASE_URL ან SUPABASE_KEY არ არის დაყენებული!")
         except Exception as e:
             logger.error(f"❌ Supabase ინიციალიზაციის შეცდომა: {e}")
     return _supabase_client
@@ -58,13 +57,6 @@ headers_storage: List[str] = []
 # ==========================================
 # 24 ძირითადი სვეტის მაპინგი (ბაზაში ჩასაწერად)
 # ==========================================
-MAIN_COLUMNS = [
-    'Div', 'Date', 'Time', 'HomeTeam', 'AwayTeam', 'Referee',
-    'FTHG', 'FTAG', 'FTR', 'HTHG', 'HTAG', 'HTR',
-    'HS', 'AS', 'HST', 'AST', 'HF', 'AF',
-    'HC', 'AC', 'HY', 'AY', 'HR', 'AR'
-]
-
 COLUMN_MAP = {
     'Div': 'division',
     'Date': 'match_date',
@@ -99,7 +91,7 @@ NUMERIC_COLUMNS = [
 ]
 
 # ==========================================
-# CSV Parser (ინახავს ყველა სვეტს UI-სთვის)
+# CSV Parser
 # ==========================================
 def parse_csv_complete(csv_text: str) -> Tuple[List[str], List[Dict]]:
     try:
@@ -112,7 +104,6 @@ def parse_csv_complete(csv_text: str) -> Tuple[List[str], List[Dict]]:
         rows = []
         for row in reader:
             filtered_row = {}
-            # ვინახავთ ყველა სვეტს, რომ UI-ში ყველაფერი გამოჩნდეს
             for col in all_headers:
                 value = row.get(col, '').strip() if row.get(col) else ''
                 if col in NUMERIC_COLUMNS:
@@ -136,10 +127,9 @@ def parse_csv_complete(csv_text: str) -> Tuple[List[str], List[Dict]]:
 @app.get("/")
 async def root():
     return {
-        "message": "FootStats API v3.0",
+        "message": "FootStats API v4.0 - Database Viewer Ready",
         "status": "running",
-        "matches_loaded": len(matches_storage),
-        "endpoints": ["/dashboard", "/api/import/csv", "/api/matches/all", "/api/save/to-database"]
+        "matches_loaded": len(matches_storage)
     }
 
 @app.post("/api/import/csv")
@@ -182,27 +172,22 @@ async def get_all_matches():
 
 @app.post("/api/save/to-database")
 async def save_to_database():
-    """ინახავს მონაცემებს Supabase-ში (მხოლოდ 24 ძირითადი სვეტი)"""
     logger.info("💾 ვიწყებ ბაზაში ჩაწერას...")
     
     if not HAS_SUPABASE:
-        logger.error("❌ Supabase არ არის დაყენებული")
         return {"success": False, "error": "Supabase არ არის დაყენებული"}
     
     supabase = get_supabase()
     if not supabase:
-        logger.error("❌ Supabase კლიენტი არ არის ინიციალიზებული")
-        return {"success": False, "error": "Supabase კლიენტი არ არის ინიციალიზებული. შეამოწმე Vercel-ის Environment Variables."}
+        return {"success": False, "error": "Supabase კლიენტი არ არის ინიციალიზებული"}
     
     if not matches_storage:
-        logger.error("❌ მონაცემები ცარიელია")
         return {"success": False, "error": "მონაცემები ცარიელია"}
     
     try:
         db_records = []
         for match in matches_storage:
             record = {}
-            # ვიღებთ მხოლოდ 24 ძირითად სვეტს ბაზისთვის
             for csv_col, db_col in COLUMN_MAP.items():
                 value = match.get(csv_col)
                 if csv_col in NUMERIC_COLUMNS:
@@ -219,7 +204,7 @@ async def save_to_database():
         for i in range(0, len(db_records), batch_size):
             batch = db_records[i:i + batch_size]
             try:
-                response = supabase.table("premier_league_2025_2026").insert(batch).execute()
+                supabase.table("premier_league_2025_2026").insert(batch).execute()
                 total_inserted += len(batch)
                 logger.info(f"✅ ჩაიწერა {total_inserted}/{len(db_records)} მატჩი")
             except Exception as e:
@@ -243,6 +228,29 @@ async def save_to_database():
         logger.error(f"❌ კრიტიკული შეცდომა: {e}")
         return {"success": False, "error": str(e)}
 
+@app.get("/api/database/data")
+async def get_database_data():
+    """იღებს მონაცემებს Supabase-იდან ვიზუალიზაციისთვის"""
+    supabase = get_supabase()
+    if not supabase:
+        return {"success": False, "error": "Supabase კლიენტი არ არის ინიციალიზებული"}
+    
+    try:
+        # ვიღებთ ბოლო 100 ჩანაწერს, დალაგებულს ID-ს მიხედვით
+        response = supabase.table("premier_league_2025_2026").select("*").order("id", desc=True).limit(100).execute()
+        
+        # UI-ში ქრონოლოგიური თანმიმდევრობით რომ იყოს, შევავრცობთ სიას
+        data = response.data[::-1]
+        
+        return {
+            "success": True,
+            "count": len(data),
+            "data": data
+        }
+    except Exception as e:
+        logger.error(f"❌ ბაზიდან წაკითხვის შეცდომა: {e}")
+        return {"success": False, "error": str(e)}
+
 # ==========================================
 # Dashboard HTML
 # ==========================================
@@ -254,7 +262,7 @@ async def get_dashboard():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>FootStats Dashboard v3.0</title>
+        <title>FootStats Dashboard v4.0</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <style>
             @keyframes slideIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
@@ -267,8 +275,8 @@ async def get_dashboard():
     <body class="bg-gradient-to-br from-[#0B0F19] to-[#1a1f2e] text-[#E2E8F0] font-sans min-h-screen">
         <div class="max-w-full mx-auto p-6">
             <div class="text-center mb-8">
-                <h1 class="text-4xl font-bold text-white mb-2">⚽ FootStats Dashboard v3.0</h1>
-                <p class="text-gray-400">ყველა სვეტის ჩვენება + 24 ძირითადი სვეტის Supabase-ში ჩაწერა</p>
+                <h1 class="text-4xl font-bold text-white mb-2">⚽ FootStats Dashboard v4.0</h1>
+                <p class="text-gray-400">იმპორტი, ვიზუალიზაცია და Supabase ბაზაში შენახვა</p>
             </div>
 
             <div class="grid grid-cols-1 md:grid-cols-5 gap-4 mb-8">
@@ -290,7 +298,7 @@ async def get_dashboard():
                 </div>
                 <div class="glass rounded-xl p-5 flex flex-col justify-center">
                     <button onclick="saveToDatabase()" id="saveBtn" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed" disabled>
-                        💾 ბაზაში ჩაწერა (24 სვეტი)
+                        💾 ბაზაში ჩაწერა
                     </button>
                 </div>
             </div>
@@ -298,6 +306,7 @@ async def get_dashboard():
             <div class="flex gap-2 mb-6">
                 <button onclick="switchTab('import')" id="tab-import" class="tab-active px-6 py-3 rounded-lg font-semibold">📥 იმპორტი</button>
                 <button onclick="switchTab('data')" id="tab-data" class="tab-inactive px-6 py-3 rounded-lg font-semibold">📊 მონაცემები</button>
+                <button onclick="switchTab('database')" id="tab-database" class="tab-inactive px-6 py-3 rounded-lg font-semibold">🗄️ ბაზა</button>
             </div>
 
             <div id="section-import" class="glass rounded-xl p-6 mb-8">
@@ -311,16 +320,35 @@ async def get_dashboard():
 
             <div id="section-data" class="hidden glass rounded-xl p-6 mb-8">
                 <div class="flex justify-between items-center mb-4">
-                    <h2 class="text-2xl font-bold text-white">📊 მონაცემთა ცხრილი</h2>
+                    <h2 class="text-2xl font-bold text-white">📊 მონაცემთა ცხრილი (მეხსიერებიდან)</h2>
                     <span class="px-3 py-1 bg-gray-800 rounded text-sm text-gray-400" id="tableInfo">0 მატჩი</span>
                 </div>
                 <div class="overflow-x-auto max-h-[600px] border border-gray-700 rounded-lg">
                     <table class="w-full text-xs text-left">
                         <thead class="text-xs text-gray-400 uppercase bg-[#0F172A] sticky top-0">
-                            <tr id="tableHeader"><th>იტვირთება...</th></tr>
+                            <tr id="tableHeader"><th class="px-2 py-2">იტვირთება...</th></tr>
                         </thead>
                         <tbody id="tableBody">
                             <tr><td class="px-3 py-4 text-center text-gray-500">ჩასვი CSV და დააჭირე "იმპორტი"-ს</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div id="section-database" class="hidden glass rounded-xl p-6 mb-8">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-2xl font-bold text-white">🗄️ ბაზაში შენახული მონაცემები (Supabase)</h2>
+                    <button onclick="loadDatabaseData()" class="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded-lg text-sm font-semibold">🔄 განახლება</button>
+                </div>
+                <div class="overflow-x-auto max-h-[600px] border border-gray-700 rounded-lg">
+                    <table class="w-full text-xs text-left">
+                        <thead class="text-xs text-gray-400 uppercase bg-[#0F172A] sticky top-0">
+                            <tr id="dbTableHeader">
+                                <th class="px-2 py-2">დააჭირე "განახლება"-ს</th>
+                            </tr>
+                        </thead>
+                        <tbody id="dbTableBody">
+                            <tr><td class="px-3 py-4 text-center text-gray-500" colspan="24">ბაზიდან მონაცემების ჩასატვირთად დააჭირე ღილაკს.</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -341,10 +369,14 @@ async def get_dashboard():
             let dataLoaded = false;
 
             function switchTab(tab) {
-                ['import', 'data'].forEach(t => {
+                ['import', 'data', 'database'].forEach(t => {
                     document.getElementById('tab-' + t).className = tab === t ? 'tab-active px-6 py-3 rounded-lg font-semibold' : 'tab-inactive px-6 py-3 rounded-lg font-semibold';
                     document.getElementById('section-' + t).classList.toggle('hidden', tab !== t);
                 });
+                
+                if (tab === 'database') {
+                    loadDatabaseData();
+                }
             }
 
             async function importCSV() {
@@ -421,20 +453,18 @@ async def get_dashboard():
                         addLog(`❌ ${result.error}`, 'error');
                     }
                 } catch (error) {
-                    addLog(`❌ შეცდომა: ${error.message}`, 'error');
+                    addLog(`❌ ${error.message}`, 'error');
                 } finally {
                     btn.disabled = false;
-                    btn.textContent = '💾 ბაზაში ჩაწერა (24 სვეტი)';
+                    btn.textContent = '💾 ბაზაში ჩაწერა';
                 }
             }
 
             async function loadMatches() {
                 addLog('🔄 მონაცემების ჩატვირთვა...', 'info');
-                
                 try {
                     const response = await fetch('/api/matches/all');
                     const result = await response.json();
-                    
                     if (result.success) {
                         renderTable(result.data, result.headers);
                         addLog(`✅ ჩაიტვირთა ${result.count} მატჩი`, 'success');
@@ -444,12 +474,28 @@ async def get_dashboard():
                 }
             }
 
+            async function loadDatabaseData() {
+                addLog('🔄 ბაზიდან მონაცემების ჩატვირთვა...', 'info');
+                try {
+                    const response = await fetch('/api/database/data');
+                    const result = await response.json();
+                    
+                    if (result.success) {
+                        renderDatabaseTable(result.data);
+                        document.getElementById('stat-db').textContent = result.count;
+                        addLog(`✅ ბაზიდან ჩაიტვირთა ${result.count} ჩანაწერი`, 'success');
+                    } else {
+                        addLog(`❌ ${result.error}`, 'error');
+                    }
+                } catch (error) {
+                    addLog(`❌ ${error.message}`, 'error');
+                }
+            }
+
             function renderTable(matches, headers) {
                 const header = document.getElementById('tableHeader');
                 const tbody = document.getElementById('tableBody');
-                
                 header.innerHTML = '<tr>' + headers.map(h => `<th class="px-2 py-2">${h}</th>`).join('') + '</tr>';
-                
                 tbody.innerHTML = matches.slice(0, 100).map(m => {
                     return '<tr class="border-b border-gray-800 hover:bg-[#1E293B]">' + 
                         headers.map(h => {
@@ -457,18 +503,55 @@ async def get_dashboard():
                             return `<td class="px-2 py-1 whitespace-nowrap">${val}</td>`;
                         }).join('') + '</tr>';
                 }).join('');
-                
                 document.getElementById('tableInfo').textContent = `${matches.length} მატჩი (ნაჩვენებია პირველი 100)`;
+            }
+
+            function renderDatabaseTable(data) {
+                const header = document.getElementById('dbTableHeader');
+                const tbody = document.getElementById('dbTableBody');
+                
+                if (!data || data.length === 0) {
+                    header.innerHTML = '<th class="px-2 py-2">ბაზა ცარიელია</th>';
+                    tbody.innerHTML = '<tr><td class="px-3 py-4 text-center text-gray-500" colspan="24">ბაზაში მონაცემები ჯერ არ არის ჩაწერილი.</td></tr>';
+                    return;
+                }
+                
+                const columns = ['match_date', 'home_team', 'full_time_home_goals', 'full_time_away_goals', 'full_time_result', 'half_time_home_goals', 'half_time_away_goals', 'half_time_result', 'referee', 'home_shots', 'away_shots', 'home_shots_on_target', 'away_shots_on_target', 'home_fouls', 'away_fouls', 'home_corners', 'away_corners', 'home_yellow_cards', 'away_yellow_cards', 'home_red_cards', 'away_red_cards'];
+                
+                const colNames = {
+                    'match_date': 'თარიღი', 'home_team': 'მასპინძელი', 'full_time_home_goals': 'გოლი (ს)',
+                    'full_time_away_goals': 'გოლი (სტ)', 'full_time_result': 'შედეგი', 'half_time_home_goals': 'HT გოლი (ს)',
+                    'half_time_away_goals': 'HT გოლი (სტ)', 'half_time_result': 'HT შედეგი', 'referee': 'მსაჯი',
+                    'home_shots': 'დარტყმები (ს)', 'away_shots': 'დარტყმები (სტ)', 'home_shots_on_target': 'კარში (ს)',
+                    'away_shots_on_target': 'კარში (სტ)', 'home_fouls': 'ჯარიმა (ს)', 'away_fouls': 'ჯარიმა (სტ)',
+                    'home_corners': 'კუთხური (ს)', 'away_corners': 'კუთხური (სტ)', 'home_yellow_cards': 'ყვითელი (ს)',
+                    'away_yellow_cards': 'ყვითელი (სტ)', 'home_red_cards': 'წითელი (ს)', 'away_red_cards': 'წითელი (სტ)'
+                };
+
+                header.innerHTML = '<tr>' + columns.map(col => `<th class="px-2 py-2">${colNames[col] || col}</th>`).join('') + '</tr>';
+                
+                tbody.innerHTML = data.map(row => {
+                    return '<tr class="border-b border-gray-800 hover:bg-[#1E293B]">' + 
+                        columns.map(col => {
+                            let val = row[col];
+                            if (val === null || val === undefined) val = '-';
+                            let cls = '';
+                            if (col === 'full_time_result') {
+                                if (val === 'H') cls = 'text-emerald-400 font-bold';
+                                else if (val === 'A') cls = 'text-red-400 font-bold';
+                                else if (val === 'D') cls = 'text-yellow-400 font-bold';
+                            }
+                            return `<td class="px-2 py-1 whitespace-nowrap ${cls}">${val}</td>`;
+                        }).join('') + '</tr>';
+                }).join('');
             }
 
             function addLog(message, type = 'info') {
                 const terminal = document.getElementById('terminal');
                 const log = document.createElement('div');
                 log.className = 'log-entry';
-                
                 const colors = { 'info': 'text-blue-400', 'success': 'text-emerald-400', 'warning': 'text-yellow-400', 'error': 'text-red-400' };
                 const timestamp = new Date().toLocaleTimeString('ka-GE');
-                
                 log.innerHTML = `<span class="text-gray-600">[${timestamp}]</span> <span class="${colors[type]}">${message}</span>`;
                 terminal.appendChild(log);
                 terminal.scrollTop = terminal.scrollHeight;
