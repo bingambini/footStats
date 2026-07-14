@@ -4,9 +4,8 @@ import os
 import csv
 import io
 from typing import Dict, List, Tuple, Optional
-from datetime import datetime
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse
 from loguru import logger
 
 try:
@@ -18,7 +17,7 @@ except ImportError:
 app = FastAPI(title="FootStats API")
 
 # ==========================================
-# Logger
+# Logger Setup
 # ==========================================
 logger.remove()
 logger.add(lambda msg: print(msg.strip()), format="<green>{time:HH:mm:ss}</green> | <level>{level}</level> | <cyan>{name}</cyan> - <level>{message}</level>")
@@ -44,30 +43,51 @@ def get_supabase():
 # ==========================================
 # In-Memory Storage
 # ==========================================
-all_matches_data: List[Dict] = []
+matches_storage: List[Dict] = []
 
 # ==========================================
-# CSV Parser - ყველა სვეტის ამოღება
+# CSV Parser - მხოლოდ ძირითადი მონაცემები (კოეფიციენტების გარეშე)
 # ==========================================
-def parse_csv_complete(csv_text: str) -> List[Dict]:
-    """ამოიღებს ყველა სვეტს CSV ფაილიდან, ზუსტად იგივე სახელებით"""
+def parse_csv_matches(csv_text: str) -> List[Dict]:
+    """ამოიღებს მხოლოდ ძირითად მონაცემებს CSV ფაილიდან"""
     try:
         reader = csv.DictReader(io.StringIO(csv_text))
         matches = []
         
         for row in reader:
-            # CSV DictReader ავტომატურად იყენებს სათაურის სახელებს
-            # ამიტომ key-ები იქნება: Div, Date, Time, HomeTeam, AwayTeam, FTHG, FTAG, FTR, ...
-            match_data = {}
-            for key, value in row.items():
-                if key:  # გამოტოვეთ ცარიელი key-ები
-                    match_data[key.strip()] = value.strip() if value else ""
+            # მხოლოდ ძირითადი სვეტები (24 სვეტი)
+            match_data = {
+                "division": row.get("Div", "").strip(),
+                "date": row.get("Date", "").strip(),
+                "time": row.get("Time", "").strip(),
+                "home_team": row.get("HomeTeam", "").strip(),
+                "away_team": row.get("AwayTeam", "").strip(),
+                "referee": row.get("Referee", "").strip(),
+                "full_time_home_goals": int(row.get("FTHG", 0) or 0),
+                "full_time_away_goals": int(row.get("FTAG", 0) or 0),
+                "full_time_result": row.get("FTR", "").strip(),
+                "half_time_home_goals": int(row.get("HTHG", 0) or 0),
+                "half_time_away_goals": int(row.get("HTAG", 0) or 0),
+                "half_time_result": row.get("HTR", "").strip(),
+                "home_shots": int(row.get("HS", 0) or 0),
+                "away_shots": int(row.get("AS", 0) or 0),
+                "home_shots_on_target": int(row.get("HST", 0) or 0),
+                "away_shots_on_target": int(row.get("AST", 0) or 0),
+                "home_fouls": int(row.get("HF", 0) or 0),
+                "away_fouls": int(row.get("AF", 0) or 0),
+                "home_corners": int(row.get("HC", 0) or 0),
+                "away_corners": int(row.get("AC", 0) or 0),
+                "home_yellow_cards": int(row.get("HY", 0) or 0),
+                "away_yellow_cards": int(row.get("AY", 0) or 0),
+                "home_red_cards": int(row.get("HR", 0) or 0),
+                "away_red_cards": int(row.get("AR", 0) or 0)
+            }
             
-            # მხოლოდ იმ რიგების დამატება, რომლებსაც აქვთ HomeTeam და AwayTeam
-            if match_data.get("HomeTeam") and match_data.get("AwayTeam"):
+            # მხოლოდ იმ რიგების დამატება, რომლებსაც აქვთ გუნდები
+            if match_data["home_team"] and match_data["away_team"]:
                 matches.append(match_data)
         
-        logger.info(f"✅ წარმატებით დამუშავდა {len(matches)} მატჩი")
+        logger.info(f"✅ წარმატებით დამუშავდა {len(matches)} მატჩი (24 სვეტი)")
         return matches
     
     except Exception as e:
@@ -79,12 +99,12 @@ def parse_csv_complete(csv_text: str) -> List[Dict]:
 # ==========================================
 @app.get("/")
 async def root():
-    return {"message": "FootStats API v2.0 - Fixed"}
+    return {"message": "FootStats API v3.0 - Premier League 2025/2026"}
 
 @app.post("/api/import/csv")
 async def import_csv(request: Request):
-    """იმპორტავს CSV-ს ყველა სვეტით"""
-    global all_matches_data
+    """იმპორტავს CSV-ს და ინახავს მეხსიერებაში"""
+    global matches_storage
     
     try:
         body = await request.json()
@@ -93,25 +113,24 @@ async def import_csv(request: Request):
         if not csv_data.strip():
             return {"success": False, "error": "CSV ცარიელია"}
         
-        all_matches_data = parse_csv_complete(csv_data)
+        matches_storage = parse_csv_matches(csv_data)
         
-        # სტატისტიკის გამოთვლა
-        total_matches = len(all_matches_data)
-        total_goals = 0
-        for m in all_matches_data:
-            try:
-                fthg = int(m.get("FTHG", 0) or 0)
-                ftag = int(m.get("FTAG", 0) or 0)
-                total_goals += fthg + ftag
-            except:
-                pass
+        # სტატისტიკა
+        total_matches = len(matches_storage)
+        total_goals = sum(m["full_time_home_goals"] + m["full_time_away_goals"] for m in matches_storage)
+        home_wins = sum(1 for m in matches_storage if m["full_time_result"] == "H")
+        away_wins = sum(1 for m in matches_storage if m["full_time_result"] == "A")
+        draws = sum(1 for m in matches_storage if m["full_time_result"] == "D")
         
         return {
             "success": True,
             "message": f"წარმატებით იმპორტირდა {total_matches} მატჩი",
-            "matches_count": total_matches,
+            "total_matches": total_matches,
             "total_goals": total_goals,
-            "sample_keys": list(all_matches_data[0].keys()) if all_matches_data else []
+            "home_wins": home_wins,
+            "away_wins": away_wins,
+            "draws": draws,
+            "avg_goals": round(total_goals / total_matches, 2) if total_matches > 0 else 0
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -121,44 +140,21 @@ async def get_all_matches():
     """აბრუნებს ყველა მატჩს"""
     return {
         "success": True,
-        "count": len(all_matches_data),
-        "data": all_matches_data
+        "count": len(matches_storage),
+        "data": matches_storage
     }
 
 @app.post("/api/save/to-database")
 async def save_to_database():
-    """ინახავს მონაცემებს Supabase-ში"""
-    if not HAS_SUPABASE:
-        return {"success": False, "error": "Supabase არ არის დაყენებული"}
-    
-    supabase = get_supabase()
-    if not supabase:
-        return {"success": False, "error": "Supabase კლიენტი არ არის ინიციალიზებული"}
-    
-    if not all_matches_data:
+    """ინახავს მონაცემებს Supabase-ში (ჯერ არ არის განხორციელებული)"""
+    if not matches_storage:
         return {"success": False, "error": "მონაცემები ჯერ არ არის იმპორტირებული"}
     
-    try:
-        # ბატჩური ჩაწერა
-        batch_size = 50
-        total_inserted = 0
-        
-        for i in range(0, len(all_matches_data), batch_size):
-            batch = all_matches_data[i:i + batch_size]
-            try:
-                supabase.table("premier_league_2025_2026").insert(batch).execute()
-                total_inserted += len(batch)
-                logger.info(f"✅ ჩაიწერა {total_inserted}/{len(all_matches_data)} მატჩი")
-            except Exception as e:
-                logger.error(f"❌ ბატჩის ჩაწერის შეცდომა: {e}")
-        
-        return {
-            "success": True,
-            "message": f"წარმატებით ჩაიწერა {total_inserted} მატჩი Supabase-ში",
-            "inserted": total_inserted
-        }
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    # აქ მომავალში იქნება Supabase-ში ჩაწერის ლოგიკა
+    return {
+        "success": False,
+        "message": "ბაზაში ჩაწერა ჯერ არ არის განხორციელებული. ეს ფუნქცია დამატებით მომავალ ეტაპზე."
+    }
 
 # ==========================================
 # Dashboard HTML
@@ -171,27 +167,27 @@ async def get_dashboard():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>FootStats Dashboard v2.0</title>
+        <title>FootStats Dashboard v3.0</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <style>
             @keyframes slideIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
             .log-entry { animation: slideIn 0.3s ease-out; }
             .glass { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); }
-            .btn-disabled { opacity: 0.5; cursor: not-allowed; }
             .table-container { max-height: 600px; overflow: auto; }
-            th { position: sticky; top: 0; background: #1e293b; z-index: 10; }
+            .result-h { color: #10b981; font-weight: bold; }
+            .result-a { color: #ef4444; font-weight: bold; }
+            .result-d { color: #f59e0b; font-weight: bold; }
         </style>
     </head>
     <body class="bg-gradient-to-br from-[#0B0F19] to-[#1a1f2e] text-[#E2E8F0] font-sans min-h-screen">
         <div class="max-w-full mx-auto p-6">
-            <!-- Header -->
             <div class="text-center mb-8">
-                <h1 class="text-4xl font-bold text-white mb-2">⚽ FootStats Dashboard v2.0</h1>
-                <p class="text-gray-400">Premier League 2025/2026 - ყველა სვეტი</p>
+                <h1 class="text-4xl font-bold text-white mb-2">⚽ FootStats Dashboard v3.0</h1>
+                <p class="text-gray-400">Premier League 2025/2026 - 24 ძირითადი სვეტი (კოეფიციენტების გარეშე)</p>
             </div>
 
-            <!-- Stats Cards -->
-            <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+            <!-- სტატისტიკის ბარათები -->
+            <div class="grid grid-cols-1 md:grid-cols-6 gap-4 mb-8">
                 <div class="glass rounded-xl p-5">
                     <p class="text-gray-400 text-sm">სულ მატჩი</p>
                     <p class="text-3xl font-bold text-white mt-1" id="stat-matches">0</p>
@@ -201,53 +197,68 @@ async def get_dashboard():
                     <p class="text-3xl font-bold text-emerald-400 mt-1" id="stat-goals">0</p>
                 </div>
                 <div class="glass rounded-xl p-5">
-                    <p class="text-gray-400 text-sm">სვეტები</p>
-                    <p class="text-3xl font-bold text-blue-400 mt-1" id="stat-columns">0</p>
+                    <p class="text-gray-400 text-sm">საშუალო გოლი</p>
+                    <p class="text-3xl font-bold text-blue-400 mt-1" id="stat-avg">0</p>
                 </div>
-                <div class="glass rounded-xl p-5 flex flex-col justify-center">
-                    <button onclick="saveToDatabase()" id="saveBtn" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 px-4 rounded-lg btn-disabled" disabled>
-                        💾 ბაზაში ჩაწერა
-                    </button>
+                <div class="glass rounded-xl p-5">
+                    <p class="text-gray-400 text-sm">მასპინძლის მოგება</p>
+                    <p class="text-3xl font-bold text-green-400 mt-1" id="stat-home">0</p>
+                </div>
+                <div class="glass rounded-xl p-5">
+                    <p class="text-gray-400 text-sm">სტუმრის მოგება</p>
+                    <p class="text-3xl font-bold text-red-400 mt-1" id="stat-away">0</p>
+                </div>
+                <div class="glass rounded-xl p-5">
+                    <p class="text-gray-400 text-sm">ფრე</p>
+                    <p class="text-3xl font-bold text-yellow-400 mt-1" id="stat-draws">0</p>
                 </div>
             </div>
 
-            <!-- Import Section -->
+            <!-- იმპორტის სექცია -->
             <div class="glass rounded-xl p-6 mb-8">
                 <h2 class="text-xl font-bold text-white mb-4">📥 CSV იმპორტი</h2>
-                <textarea id="csvInput" rows="8" placeholder="ჩასვი CSV ფაილის შიგთავსი აქ..." class="w-full bg-[#0B0F19] border border-gray-700 rounded-lg p-4 text-emerald-400 font-mono text-xs resize-none focus:outline-none focus:border-emerald-500"></textarea>
+                <textarea id="csvInput" rows="8" placeholder="ჩასვი football-data.co.uk ფორმატის CSV ტექსტი აქ..." class="w-full bg-[#0B0F19] border border-gray-700 rounded-lg p-4 text-emerald-400 font-mono text-xs resize-none focus:outline-none focus:border-emerald-500"></textarea>
                 <div class="flex gap-3 mt-4">
-                    <button onclick="importCSV()" id="importBtn" class="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-3 rounded-lg">
-                        🚀 დამუშავება
-                    </button>
-                    <button onclick="document.getElementById('csvInput').value=''" class="px-6 py-3 bg-gray-700 hover:bg-gray-600 text-white rounded-lg">
-                        🗑️ გასუფთავება
-                    </button>
+                    <button onclick="importCSV()" id="importBtn" class="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-3 rounded-lg">🚀 იმპორტი და დამუშავება</button>
+                    <button onclick="saveToDatabase()" id="saveBtn" class="flex-1 bg-blue-600 hover:bg-blue-500 text-white font-semibold py-3 rounded-lg" disabled>💾 ბაზაში ჩაწერა</button>
+                    <button onclick="document.getElementById('csvInput').value=''" class="px-6 py-3 bg-gray-700 hover:bg-gray-600 text-white rounded-lg">🗑️</button>
                 </div>
             </div>
 
-            <!-- Matches Table -->
+            <!-- მონაცემთა ცხრილი -->
             <div class="glass rounded-xl p-6 mb-8">
                 <div class="flex justify-between items-center mb-4">
-                    <h2 class="text-xl font-bold text-white">📋 მატჩების ცხრილი</h2>
-                    <span class="px-3 py-1 bg-gray-800 rounded text-sm text-gray-400" id="tableInfo">0 მატჩი</span>
+                    <h2 class="text-xl font-bold text-white">📊 მატჩების ცხრილი (<span id="matchCount">0</span> მატჩი)</h2>
                 </div>
                 <div class="table-container border border-gray-700 rounded-lg">
-                    <table class="w-full text-sm text-left">
-                        <thead class="text-xs text-gray-400 uppercase bg-[#0F172A]">
-                            <tr id="tableHeader">
-                                <th class="px-3 py-2">იტვირთება...</th>
+                    <table class="w-full text-xs text-left">
+                        <thead class="text-xs text-gray-400 uppercase bg-[#0F172A] sticky top-0">
+                            <tr>
+                                <th class="px-2 py-2">თარიღი</th>
+                                <th class="px-2 py-2">მასპინძელი</th>
+                                <th class="px-2 py-2 text-center">FT</th>
+                                <th class="px-2 py-2">სტუმარი</th>
+                                <th class="px-2 py-2 text-center">შედეგი</th>
+                                <th class="px-2 py-2 text-center">HT</th>
+                                <th class="px-2 py-2 text-center">დარტყმები</th>
+                                <th class="px-2 py-2 text-center">კარში</th>
+                                <th class="px-2 py-2 text-center">ჯარიმები</th>
+                                <th class="px-2 py-2 text-center">კუთხურები</th>
+                                <th class="px-2 py-2 text-center">🟨</th>
+                                <th class="px-2 py-2 text-center">🟥</th>
+                                <th class="px-2 py-2">მსაჯი</th>
                             </tr>
                         </thead>
-                        <tbody id="tableBody">
+                        <tbody id="matchesTable">
                             <tr>
-                                <td class="px-3 py-4 text-center text-gray-500">ჩასვი CSV და დააჭირე "დამუშავება"-ს</td>
+                                <td colspan="13" class="px-4 py-8 text-center text-gray-500">ჩასვი CSV და დააჭირე "იმპორტი"-ს</td>
                             </tr>
                         </tbody>
                     </table>
                 </div>
             </div>
 
-            <!-- Logs -->
+            <!-- ლოგები -->
             <div class="glass rounded-xl p-6">
                 <div class="flex justify-between items-center mb-4">
                     <h3 class="text-lg font-bold text-white">📜 ლაივ ლოგები</h3>
@@ -260,9 +271,6 @@ async def get_dashboard():
         </div>
 
         <script>
-            let allMatchesData = [];
-            let allColumns = [];
-
             async function importCSV() {
                 const csv = document.getElementById('csvInput').value;
                 const btn = document.getElementById('importBtn');
@@ -274,7 +282,7 @@ async def get_dashboard():
                 
                 btn.disabled = true;
                 btn.textContent = '⏳ მუშაობს...';
-                addLog('📥 იმპორტი იწყება...', 'info');
+                addLog('📥 CSV იმპორტი იწყება...', 'info');
                 
                 try {
                     const response = await fetch('/api/import/csv', {
@@ -287,11 +295,20 @@ async def get_dashboard():
                     
                     if (result.success) {
                         addLog(`✅ ${result.message}`, 'success');
-                        addLog(`📊 სვეტები: ${result.sample_keys ? result.sample_keys.length : 0}`, 'info');
+                        addLog(`⚽ სულ გოლი: ${result.total_goals}`, 'info');
+                        addLog(`📊 საშუალო: ${result.avg_goals} გოლი/მატჩი`, 'info');
+                        addLog(`🏠 მასპინძლის მოგება: ${result.home_wins}`, 'info');
+                        addLog(`✈️ სტუმრის მოგება: ${result.away_wins}`, 'info');
+                        addLog(`🤝 ფრე: ${result.draws}`, 'info');
                         
-                        document.getElementById('stat-matches').textContent = result.matches_count;
+                        document.getElementById('stat-matches').textContent = result.total_matches;
                         document.getElementById('stat-goals').textContent = result.total_goals;
-                        document.getElementById('stat-columns').textContent = result.sample_keys ? result.sample_keys.length : 0;
+                        document.getElementById('stat-avg').textContent = result.avg_goals;
+                        document.getElementById('stat-home').textContent = result.home_wins;
+                        document.getElementById('stat-away').textContent = result.away_wins;
+                        document.getElementById('stat-draws').textContent = result.draws;
+                        
+                        document.getElementById('saveBtn').disabled = false;
                         
                         await loadMatches();
                     } else {
@@ -301,7 +318,7 @@ async def get_dashboard():
                     addLog(`❌ ${error.message}`, 'error');
                 } finally {
                     btn.disabled = false;
-                    btn.textContent = '🚀 დამუშავება';
+                    btn.textContent = '🚀 იმპორტი და დამუშავება';
                 }
             }
 
@@ -311,81 +328,51 @@ async def get_dashboard():
                     const result = await response.json();
                     
                     if (result.success && result.data.length > 0) {
-                        allMatchesData = result.data;
-                        allColumns = Object.keys(result.data[0]);
-                        
-                        document.getElementById('tableInfo').textContent = `${result.count} მატჩი × ${allColumns.length} სვეტი`;
-                        
-                        renderTable();
-                        enableSaveButton();
+                        document.getElementById('matchCount').textContent = result.count;
+                        renderTable(result.data);
                     }
                 } catch (error) {
                     addLog(`❌ ${error.message}`, 'error');
                 }
             }
 
-            function renderTable() {
-                const header = document.getElementById('tableHeader');
-                const tbody = document.getElementById('tableBody');
+            function renderTable(matches) {
+                const tbody = document.getElementById('matchesTable');
                 
-                // ძირითადი სვეტები რომლებიც ყოველთვის უნდა ვაჩვენოთ
-                const mainColumns = ['Div', 'Date', 'Time', 'HomeTeam', 'AwayTeam', 'FTHG', 'FTAG', 'FTR', 'Referee', 'HS', 'AS', 'HC', 'AC'];
-                
-                // სათაური
-                header.innerHTML = '<tr>' + mainColumns.map(col => 
-                    `<th class="px-3 py-2 whitespace-nowrap">${col}</th>`
-                ).join('') + '</tr>';
-                
-                // სხეული - ვაჩვენებთ მხოლოდ მთავარ სვეტებს
-                tbody.innerHTML = allMatchesData.slice(0, 100).map(m => {
-                    const resultColor = m.FTR === 'H' ? 'text-emerald-400' : m.FTR === 'A' ? 'text-red-400' : 'text-yellow-400';
-                    const resultText = m.FTR === 'H' ? 'მასპინძელი' : m.FTR === 'A' ? 'სტუმარი' : 'ფრე';
+                tbody.innerHTML = matches.map(m => {
+                    const resultClass = m.full_time_result === 'H' ? 'result-h' : m.full_time_result === 'A' ? 'result-a' : 'result-d';
+                    const resultText = m.full_time_result === 'H' ? 'მასპინძელი' : m.full_time_result === 'A' ? 'სტუმარი' : 'ფრე';
+                    const totalCards = m.home_yellow_cards + m.away_yellow_cards;
+                    const totalRed = m.home_red_cards + m.away_red_cards;
                     
-                    return `<tr class="border-b border-gray-800 hover:bg-[#1E293B]">
-                        <td class="px-3 py-2 text-gray-400">${m.Div || '-'}</td>
-                        <td class="px-3 py-2">${m.Date || '-'}</td>
-                        <td class="px-3 py-2 text-gray-400">${m.Time || '-'}</td>
-                        <td class="px-3 py-2 font-semibold text-white">${m.HomeTeam || '-'}</td>
-                        <td class="px-3 py-2 font-semibold text-white">${m.AwayTeam || '-'}</td>
-                        <td class="px-3 py-2 text-center font-bold text-lg">${m.FTHG || 0}</td>
-                        <td class="px-3 py-2 text-center font-bold text-lg">${m.FTAG || 0}</td>
-                        <td class="px-3 py-2 text-center font-bold ${resultColor}">${resultText}</td>
-                        <td class="px-3 py-2 text-gray-400 text-xs">${m.Referee || '-'}</td>
-                        <td class="px-3 py-2 text-center">${m.HS || 0}/${m.AS || 0}</td>
-                        <td class="px-3 py-2 text-center">${m.HC || 0}/${m.AC || 0}</td>
-                    </tr>`;
+                    return `
+                        <tr class="border-b border-gray-800 hover:bg-[#1E293B]">
+                            <td class="px-2 py-2 text-gray-400">${m.date}</td>
+                            <td class="px-2 py-2 font-semibold text-white">${m.home_team}</td>
+                            <td class="px-2 py-2 text-center font-bold">${m.full_time_home_goals} - ${m.full_time_away_goals}</td>
+                            <td class="px-2 py-2 font-semibold text-white">${m.away_team}</td>
+                            <td class="px-2 py-2 text-center ${resultClass}">${resultText}</td>
+                            <td class="px-2 py-2 text-center text-gray-400">${m.half_time_home_goals}-${m.half_time_away_goals}</td>
+                            <td class="px-2 py-2 text-center">${m.home_shots}/${m.away_shots}</td>
+                            <td class="px-2 py-2 text-center">${m.home_shots_on_target}/${m.away_shots_on_target}</td>
+                            <td class="px-2 py-2 text-center">${m.home_fouls}/${m.away_fouls}</td>
+                            <td class="px-2 py-2 text-center">${m.home_corners}/${m.away_corners}</td>
+                            <td class="px-2 py-2 text-center">${totalCards} 🟨</td>
+                            <td class="px-2 py-2 text-center">${totalRed} 🟥</td>
+                            <td class="px-2 py-2 text-gray-400 text-xs">${m.referee}</td>
+                        </tr>
+                    `;
                 }).join('');
                 
-                if (allMatchesData.length > 100) {
-                    addLog(`ℹ️ ნაჩვენებია პირველი 100 მატჩი (სულ ${allMatchesData.length})`, 'info');
-                }
-            }
-
-            function enableSaveButton() {
-                const btn = document.getElementById('saveBtn');
-                btn.disabled = false;
-                btn.classList.remove('btn-disabled');
-                btn.classList.add('animate-pulse');
-                setTimeout(() => btn.classList.remove('animate-pulse'), 3000);
-                addLog('✅ "ბაზაში ჩაწერა" ღილაკი აქტიური გახდა', 'success');
+                addLog(`📋 ცხრილი აგებულია: ${matches.length} მატჩი`, 'success');
             }
 
             async function saveToDatabase() {
-                const btn = document.getElementById('saveBtn');
-                
-                if (allMatchesData.length === 0) {
-                    addLog('❌ ჯერ იმპორტირეთ მონაცემები', 'error');
-                    return;
-                }
-                
-                btn.disabled = true;
-                btn.textContent = '⏳ ჩაწერა მიმდინარეობს...';
                 addLog('💾 ბაზაში ჩაწერა იწყება...', 'info');
                 
                 try {
                     const response = await fetch('/api/save/to-database', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' }
+                        method: 'POST'
                     });
                     
                     const result = await response.json();
@@ -393,13 +380,10 @@ async def get_dashboard():
                     if (result.success) {
                         addLog(`✅ ${result.message}`, 'success');
                     } else {
-                        addLog(`❌ ${result.error}`, 'error');
+                        addLog(`⚠️ ${result.message || result.error}`, 'warning');
                     }
                 } catch (error) {
                     addLog(`❌ ${error.message}`, 'error');
-                } finally {
-                    btn.disabled = false;
-                    btn.textContent = '💾 ბაზაში ჩაწერა';
                 }
             }
 
@@ -407,8 +391,10 @@ async def get_dashboard():
                 const terminal = document.getElementById('terminal');
                 const log = document.createElement('div');
                 log.className = 'log-entry';
+                
                 const colors = { 'info': 'text-blue-400', 'success': 'text-emerald-400', 'warning': 'text-yellow-400', 'error': 'text-red-400' };
                 const timestamp = new Date().toLocaleTimeString('ka-GE');
+                
                 log.innerHTML = `<span class="text-gray-600">[${timestamp}]</span> <span class="${colors[type]}">${message}</span>`;
                 terminal.appendChild(log);
                 terminal.scrollTop = terminal.scrollHeight;
