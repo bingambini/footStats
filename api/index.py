@@ -16,7 +16,7 @@ try:
 except ImportError:
     HAS_SUPABASE = False
 
-app = FastAPI(title="FootStats API v2.0")
+app = FastAPI(title="FootStats API v3.0")
 
 # ==========================================
 # Logger Setup
@@ -34,15 +34,17 @@ def get_supabase():
     if _supabase_client is None:
         try:
             url = os.environ.get("SUPABASE_URL")
-            key = os.environ.get("SUPABASE_KEY")
+            # მნიშვნელოვანი გამოსწორება: ვამოწმებთ ორივე შესაძლო სახელს
+            key = os.environ.get("SUPABASE_KEY") or os.environ.get("SUPABASE_ANON_KEY")
+            
             logger.info(f"🔍 SUPABASE_URL: {'SET' if url else 'NOT SET'}")
-            logger.info(f"🔍 SUPABASE_KEY: {'SET' if key else 'NOT SET'}")
+            logger.info(f"🔍 SUPABASE_KEY/ANON_KEY: {'SET' if key else 'NOT SET'}")
             
             if url and key:
                 _supabase_client = create_client(url, key)
-                logger.info("✅ Supabase კლიენტი ინიციალიზდა")
+                logger.info("✅ Supabase კლიენტი წარმატებით ინიციალიზდა")
             else:
-                logger.error("❌ SUPABASE_URL ან SUPABASE_KEY არ არის დაყენებული!")
+                logger.error("❌ SUPABASE_URL ან SUPABASE_KEY/SUPABASE_ANON_KEY არ არის დაყენებული!")
         except Exception as e:
             logger.error(f"❌ Supabase ინიციალიზაციის შეცდომა: {e}")
     return _supabase_client
@@ -54,7 +56,7 @@ matches_storage: List[Dict] = []
 headers_storage: List[str] = []
 
 # ==========================================
-# 24 ძირითადი სვეტის მაპინგი
+# 24 ძირითადი სვეტის მაპინგი (ბაზაში ჩასაწერად)
 # ==========================================
 MAIN_COLUMNS = [
     'Div', 'Date', 'Time', 'HomeTeam', 'AwayTeam', 'Referee',
@@ -97,7 +99,7 @@ NUMERIC_COLUMNS = [
 ]
 
 # ==========================================
-# CSV Parser
+# CSV Parser (ინახავს ყველა სვეტს UI-სთვის)
 # ==========================================
 def parse_csv_complete(csv_text: str) -> Tuple[List[str], List[Dict]]:
     try:
@@ -110,20 +112,20 @@ def parse_csv_complete(csv_text: str) -> Tuple[List[str], List[Dict]]:
         rows = []
         for row in reader:
             filtered_row = {}
-            for col in MAIN_COLUMNS:
-                if col in row:
-                    value = row[col].strip() if row[col] else ''
-                    if col in NUMERIC_COLUMNS:
-                        try:
-                            filtered_row[col] = int(float(value)) if value else 0
-                        except:
-                            filtered_row[col] = 0
-                    else:
-                        filtered_row[col] = value
+            # ვინახავთ ყველა სვეტს, რომ UI-ში ყველაფერი გამოჩნდეს
+            for col in all_headers:
+                value = row.get(col, '').strip() if row.get(col) else ''
+                if col in NUMERIC_COLUMNS:
+                    try:
+                        filtered_row[col] = int(float(value)) if value else 0
+                    except:
+                        filtered_row[col] = 0
+                else:
+                    filtered_row[col] = value
             rows.append(filtered_row)
         
-        logger.success(f"✅ წარმატებით დამუშავდა {len(rows)} მატჩი")
-        return MAIN_COLUMNS, rows
+        logger.success(f"✅ წარმატებით დამუშავდა {len(rows)} მატჩი, {len(all_headers)} სვეტი")
+        return all_headers, rows
     except Exception as e:
         logger.error(f"❌ CSV პარსინგის შეცდომა: {e}")
         return [], []
@@ -134,7 +136,7 @@ def parse_csv_complete(csv_text: str) -> Tuple[List[str], List[Dict]]:
 @app.get("/")
 async def root():
     return {
-        "message": "FootStats API v2.0",
+        "message": "FootStats API v3.0",
         "status": "running",
         "matches_loaded": len(matches_storage),
         "endpoints": ["/dashboard", "/api/import/csv", "/api/matches/all", "/api/save/to-database"]
@@ -180,7 +182,7 @@ async def get_all_matches():
 
 @app.post("/api/save/to-database")
 async def save_to_database():
-    """ინახავს მონაცემებს Supabase-ში"""
+    """ინახავს მონაცემებს Supabase-ში (მხოლოდ 24 ძირითადი სვეტი)"""
     logger.info("💾 ვიწყებ ბაზაში ჩაწერას...")
     
     if not HAS_SUPABASE:
@@ -190,29 +192,27 @@ async def save_to_database():
     supabase = get_supabase()
     if not supabase:
         logger.error("❌ Supabase კლიენტი არ არის ინიციალიზებული")
-        return {"success": False, "error": "Supabase კლიენტი არ არის ინიციალიზებული"}
+        return {"success": False, "error": "Supabase კლიენტი არ არის ინიციალიზებული. შეამოწმე Vercel-ის Environment Variables."}
     
     if not matches_storage:
         logger.error("❌ მონაცემები ცარიელია")
         return {"success": False, "error": "მონაცემები ცარიელია"}
     
     try:
-        # ვამზადებთ მონაცემებს ბაზისთვის
         db_records = []
         for match in matches_storage:
             record = {}
+            # ვიღებთ მხოლოდ 24 ძირითად სვეტს ბაზისთვის
             for csv_col, db_col in COLUMN_MAP.items():
                 value = match.get(csv_col)
                 if csv_col in NUMERIC_COLUMNS:
                     record[db_col] = int(value) if value else 0
                 else:
                     record[db_col] = value if value else None
-            
             db_records.append(record)
         
-        logger.info(f"📝 მზად არის {len(db_records)} მატჩი ჩასაწერად")
+        logger.info(f"📝 მზად არის {len(db_records)} მატჩი ჩასაწერად (24 სვეტი)")
         
-        # ბატჩური ჩაწერა (50 მატჩი ერთდროულად)
         batch_size = 50
         total_inserted = 0
         
@@ -224,7 +224,6 @@ async def save_to_database():
                 logger.info(f"✅ ჩაიწერა {total_inserted}/{len(db_records)} მატჩი")
             except Exception as e:
                 logger.error(f"❌ ბატჩის ჩაწერის შეცდომა: {e}")
-                # ვცდილობთ ცალ-ცალკე
                 for record in batch:
                     try:
                         supabase.table("premier_league_2025_2026").insert(record).execute()
@@ -255,7 +254,7 @@ async def get_dashboard():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>FootStats Dashboard v2.0</title>
+        <title>FootStats Dashboard v3.0</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <style>
             @keyframes slideIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
@@ -268,8 +267,8 @@ async def get_dashboard():
     <body class="bg-gradient-to-br from-[#0B0F19] to-[#1a1f2e] text-[#E2E8F0] font-sans min-h-screen">
         <div class="max-w-full mx-auto p-6">
             <div class="text-center mb-8">
-                <h1 class="text-4xl font-bold text-white mb-2">⚽ FootStats Dashboard v2.0</h1>
-                <p class="text-gray-400">24 ძირითადი სვეტი + Supabase ბაზაში ჩაწერა</p>
+                <h1 class="text-4xl font-bold text-white mb-2">⚽ FootStats Dashboard v3.0</h1>
+                <p class="text-gray-400">ყველა სვეტის ჩვენება + 24 ძირითადი სვეტის Supabase-ში ჩაწერა</p>
             </div>
 
             <div class="grid grid-cols-1 md:grid-cols-5 gap-4 mb-8">
@@ -278,7 +277,7 @@ async def get_dashboard():
                     <p class="text-3xl font-bold text-white mt-1" id="stat-imported">0</p>
                 </div>
                 <div class="glass rounded-xl p-5">
-                    <p class="text-gray-400 text-sm">სვეტები</p>
+                    <p class="text-gray-400 text-sm">სულ სვეტები</p>
                     <p class="text-3xl font-bold text-emerald-400 mt-1" id="stat-columns">0</p>
                 </div>
                 <div class="glass rounded-xl p-5">
@@ -290,8 +289,8 @@ async def get_dashboard():
                     <p class="text-3xl font-bold text-purple-400 mt-1" id="stat-db">0</p>
                 </div>
                 <div class="glass rounded-xl p-5 flex flex-col justify-center">
-                    <button onclick="saveToDatabase()" id="saveBtn" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-lg disabled:opacity-50" disabled>
-                        💾 ბაზაში ჩაწერა
+                    <button onclick="saveToDatabase()" id="saveBtn" class="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed" disabled>
+                        💾 ბაზაში ჩაწერა (24 სვეტი)
                     </button>
                 </div>
             </div>
@@ -306,7 +305,7 @@ async def get_dashboard():
                 <textarea id="csvInput" rows="10" placeholder="ჩასვი CSV ფაილი აქ..." class="w-full bg-[#0B0F19] border border-gray-700 rounded-lg p-4 text-emerald-400 font-mono text-xs resize-none focus:outline-none focus:border-emerald-500"></textarea>
                 <div class="flex gap-3 mt-4">
                     <button onclick="importCSV()" id="importBtn" class="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-3 rounded-lg">🚀 იმპორტი</button>
-                    <button onclick="document.getElementById('csvInput').value=''" class="px-6 py-3 bg-gray-700 hover:bg-gray-600 text-white rounded-lg">🗑️</button>
+                    <button onclick="document.getElementById('csvInput').value=''" class="px-6 py-3 bg-gray-700 hover:bg-gray-600 text-white rounded-lg">🗑️ გასუფთავება</button>
                 </div>
             </div>
 
@@ -425,7 +424,7 @@ async def get_dashboard():
                     addLog(`❌ შეცდომა: ${error.message}`, 'error');
                 } finally {
                     btn.disabled = false;
-                    btn.textContent = '💾 ბაზაში ჩაწერა';
+                    btn.textContent = '💾 ბაზაში ჩაწერა (24 სვეტი)';
                 }
             }
 
@@ -459,7 +458,7 @@ async def get_dashboard():
                         }).join('') + '</tr>';
                 }).join('');
                 
-                document.getElementById('tableInfo').textContent = `${matches.length} მატჩი`;
+                document.getElementById('tableInfo').textContent = `${matches.length} მატჩი (ნაჩვენებია პირველი 100)`;
             }
 
             function addLog(message, type = 'info') {
