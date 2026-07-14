@@ -8,19 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from loguru import logger
 
-try:
-    from supabase import create_client, Client
-    HAS_SUPABASE = True
-except ImportError:
-    HAS_SUPABASE = False
-
-app = FastAPI(title="FootStats API")
-
-# ==========================================
-# Logger Setup
-# ==========================================
-logger.remove()
-logger.add(lambda msg: print(msg.strip()), format="<green>{time:HH:mm:ss}</green> | <level>{level}</level> | <cyan>{name}</cyan> - <level>{message}</level>")
+app = FastAPI()
 
 # ==========================================
 # In-Memory Storage
@@ -29,43 +17,35 @@ matches_storage: List[Dict] = []
 headers_storage: List[str] = []
 
 # ==========================================
-# CSV Parser - გამართული ვერსია
+# CSV Parser - ყველა სვეტის ამოღება
 # ==========================================
 def parse_csv_complete(csv_text: str) -> Tuple[List[str], List[Dict]]:
-    """პარსავს CSV-ს და ამოიღებს ყველა სვეტს"""
+    """ამოიღებს ყველა სვეტს CSV ფაილიდან"""
     try:
-        # ვშლით BOM-ს თუ არის
         if csv_text.startswith('\ufeff'):
             csv_text = csv_text[1:]
         
-        # ვიყენებთ csv.reader-ს ნაცვლად DictReader-ისა
         lines = csv_text.strip().split('\n')
         
         if len(lines) < 2:
-            logger.error("CSV ფაილი ცარიელია ან არასრულია")
             return [], []
         
-        # პირველი სტრიქონი არის header
         header_line = lines[0]
         headers = [h.strip() for h in header_line.split(',')]
         
         logger.info(f"ნაპოვნია {len(headers)} სვეტი")
         
-        # დანარჩენი სტრიქონები არის მონაცემები
         matches = []
         for i, line in enumerate(lines[1:], start=1):
             if not line.strip():
                 continue
             
-            # ვყოფთ მძიმით
             values = [v.strip() for v in line.split(',')]
             
-            # ვქმნით dictionary-ს
             match_data = {}
             for j, header in enumerate(headers):
                 if j < len(values):
                     value = values[j]
-                    # ვცდილობთ რიცხვად კონვერტაციას
                     if value:
                         try:
                             if '.' in value:
@@ -93,15 +73,10 @@ def parse_csv_complete(csv_text: str) -> Tuple[List[str], List[Dict]]:
 # ==========================================
 @app.get("/")
 async def root():
-    return {
-        "message": "FootStats API v4.0 - Full CSV Parser",
-        "status": "running",
-        "matches_loaded": len(matches_storage)
-    }
+    return {"message": "FootStats API v6.0 - All 132 Columns"}
 
 @app.post("/api/import/csv")
 async def import_csv(request: Request):
-    """იმპორტავს CSV-ს"""
     global matches_storage, headers_storage
     
     try:
@@ -111,64 +86,35 @@ async def import_csv(request: Request):
         if not csv_data.strip():
             return {"success": False, "error": "CSV ცარიელია"}
         
-        logger.info(f"CSV იმპორტი იწყება ({len(csv_data)} სიმბოლო)")
-        
         headers_storage, matches_storage = parse_csv_complete(csv_data)
         
-        if not matches_storage:
-            return {"success": False, "error": "მონაცემები ვერ მოიძებნა"}
-        
-        # სტატისტიკა
-        total_matches = len(matches_storage)
         total_goals = sum(
-            (m.get("FTHG") or 0) + (m.get("FTAG") or 0) 
+            (m.get("FTHG", 0) or 0) + (m.get("FTAG", 0) or 0) 
             for m in matches_storage
         )
         
         return {
             "success": True,
-            "message": f"წარმატებით იმპორტირდა {total_matches} მატჩი",
-            "matches_count": total_matches,
+            "message": f"წარმატებით იმპორტირდა {len(matches_storage)} მატჩი",
+            "matches_count": len(matches_storage),
             "columns_count": len(headers_storage),
-            "total_goals": total_goals,
-            "headers": headers_storage[:10]  # პირველი 10 სვეტი
+            "headers": headers_storage,
+            "total_goals": total_goals
         }
-    
     except Exception as e:
-        logger.error(f"იმპორტის შეცდომა: {e}")
         return {"success": False, "error": str(e)}
 
 @app.get("/api/matches/all")
 async def get_all_matches():
-    """აბრუნებს ყველა მატჩს"""
     return {
         "success": True,
         "count": len(matches_storage),
         "headers": headers_storage,
-        "data": matches_storage[:100]  # პირველი 100 მატჩი
-    }
-
-@app.get("/api/matches/stats")
-async def get_matches_stats():
-    """აბრუნებს სტატისტიკას"""
-    if not matches_storage:
-        return {"success": False, "error": "მონაცემები არ არის"}
-    
-    total_matches = len(matches_storage)
-    total_goals = sum(
-        (m.get("FTHG") or 0) + (m.get("FTAG") or 0) 
-        for m in matches_storage
-    )
-    
-    return {
-        "success": True,
-        "total_matches": total_matches,
-        "total_goals": total_goals,
-        "avg_goals": round(total_goals / total_matches, 2) if total_matches > 0 else 0
+        "data": matches_storage
     }
 
 # ==========================================
-# Dashboard HTML
+# Dashboard HTML - ყველა სვეტის ჩვენებით
 # ==========================================
 @app.get("/dashboard", response_class=HTMLResponse)
 async def get_dashboard():
@@ -178,87 +124,139 @@ async def get_dashboard():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>FootStats Dashboard v4.0</title>
+        <title>FootStats Dashboard v6.0</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <style>
-            @keyframes slideIn { 
-                from { opacity: 0; transform: translateY(10px); } 
-                to { opacity: 1; transform: translateY(0); } 
-            }
+            @keyframes slideIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
             .log-entry { animation: slideIn 0.3s ease-out; }
-            .glass { 
-                background: rgba(30, 41, 59, 0.7); 
-                backdrop-filter: blur(10px); 
-                border: 1px solid rgba(255, 255, 255, 0.1); 
+            .glass { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); }
+            
+            /* ცხრილის სტილები */
+            .table-scroll {
+                overflow-x: auto;
+                max-height: 600px;
+                overflow-y: auto;
             }
-            .table-container { 
-                max-height: 600px; 
-                overflow: auto; 
+            .data-table {
+                border-collapse: collapse;
+                font-size: 0.7rem;
+                white-space: nowrap;
             }
-            table { 
-                font-size: 0.7rem; 
+            .data-table thead {
+                position: sticky;
+                top: 0;
+                background: #0F172A;
+                z-index: 10;
             }
-            th { 
-                position: sticky; 
-                top: 0; 
-                background: #1e293b; 
-                z-index: 10; 
+            .data-table th {
+                padding: 0.5rem 0.75rem;
+                text-align: left;
+                font-weight: 600;
+                color: #9CA3AF;
+                border-bottom: 2px solid #374151;
+                border-right: 1px solid #1F2937;
+                white-space: nowrap;
+            }
+            .data-table td {
+                padding: 0.4rem 0.6rem;
+                border-bottom: 1px solid #1F2937;
+                border-right: 1px solid #1F2937;
+                white-space: nowrap;
+            }
+            .data-table tr:hover {
+                background-color: rgba(16, 185, 129, 0.1);
+            }
+            
+            /* სვეტების ფილტრი */
+            .column-filter {
+                max-height: 300px;
+                overflow-y: auto;
+            }
+            .column-checkbox {
+                display: flex;
+                align-items: center;
+                padding: 0.25rem 0.5rem;
+                cursor: pointer;
+            }
+            .column-checkbox:hover {
+                background: rgba(16, 185, 129, 0.1);
             }
         </style>
     </head>
     <body class="bg-gradient-to-br from-[#0B0F19] to-[#1a1f2e] text-[#E2E8F0] font-sans min-h-screen">
         <div class="max-w-full mx-auto p-6">
+            <!-- Header -->
             <div class="text-center mb-8">
-                <h1 class="text-4xl font-bold text-white mb-2">⚽ FootStats Dashboard v4.0</h1>
-                <p class="text-gray-400">სრული 132 სვეტიანი მონაცემთა ბაზა</p>
+                <h1 class="text-4xl font-bold text-white mb-2">⚽ FootStats Dashboard v6.0</h1>
+                <p class="text-gray-400">ყველა 132 სვეტის ჩვენება + ფილტრი</p>
             </div>
 
             <!-- სტატისტიკის ბარათები -->
-            <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
+            <div class="grid grid-cols-1 md:grid-cols-5 gap-4 mb-8">
                 <div class="glass rounded-xl p-5">
                     <p class="text-gray-400 text-sm">სულ მატჩი</p>
                     <p class="text-3xl font-bold text-white mt-1" id="stat-matches">0</p>
                 </div>
                 <div class="glass rounded-xl p-5">
-                    <p class="text-gray-400 text-sm">სულ გოლი</p>
-                    <p class="text-3xl font-bold text-emerald-400 mt-1" id="stat-goals">0</p>
-                </div>
-                <div class="glass rounded-xl p-5">
-                    <p class="text-gray-400 text-sm">საშუალო გოლი</p>
-                    <p class="text-3xl font-bold text-blue-400 mt-1" id="stat-avg">0</p>
-                </div>
-                <div class="glass rounded-xl p-5">
                     <p class="text-gray-400 text-sm">სვეტები</p>
-                    <p class="text-3xl font-bold text-purple-400 mt-1" id="stat-columns">0</p>
+                    <p class="text-3xl font-bold text-emerald-400 mt-1" id="stat-columns">0</p>
+                </div>
+                <div class="glass rounded-xl p-5">
+                    <p class="text-gray-400 text-sm">სულ გოლი</p>
+                    <p class="text-3xl font-bold text-blue-400 mt-1" id="stat-goals">0</p>
+                </div>
+                <div class="glass rounded-xl p-5">
+                    <p class="text-gray-400 text-sm">ჩვენებული სვეტები</p>
+                    <p class="text-3xl font-bold text-purple-400 mt-1" id="stat-visible">0</p>
+                </div>
+                <div class="glass rounded-xl p-5 flex flex-col justify-center">
+                    <button onclick="exportJSON()" class="bg-blue-600 hover:bg-blue-500 text-white font-semibold py-2 rounded">💾 JSON ექსპორტი</button>
                 </div>
             </div>
 
             <!-- CSV იმპორტი -->
             <div class="glass rounded-xl p-6 mb-8">
-                <h2 class="text-xl font-bold text-white mb-4">📥 CSV იმპორტი</h2>
-                <textarea id="csvInput" rows="10" placeholder="ჩასვი CSV ფაილის შიგთავსი აქ..." class="w-full bg-[#0B0F19] border border-gray-700 rounded-lg p-4 text-emerald-400 font-mono text-xs resize-none focus:outline-none focus:border-emerald-500"></textarea>
+                <h2 class="text-xl font-bold text-white mb-4">📥 CSV იმპორტი (ყველა 132 სვეტით)</h2>
+                <textarea id="csvInput" rows="6" placeholder="ჩასვი CSV ფაილის შიგთავსი აქ..." class="w-full bg-[#0B0F19] border border-gray-700 rounded-lg p-3 text-emerald-400 font-mono text-xs resize-none focus:outline-none focus:border-emerald-500"></textarea>
                 <div class="flex gap-3 mt-4">
                     <button onclick="importCSV()" id="importBtn" class="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold py-3 rounded-lg">🚀 იმპორტი</button>
-                    <button onclick="document.getElementById('csvInput').value=''" class="px-6 py-3 bg-gray-700 hover:bg-gray-600 text-white rounded-lg">🗑️ გასუფთავება</button>
+                    <button onclick="document.getElementById('csvInput').value=''" class="px-6 py-3 bg-gray-700 hover:bg-gray-600 text-white rounded-lg">🗑️</button>
+                </div>
+            </div>
+
+            <!-- სვეტების ფილტრი -->
+            <div class="glass rounded-xl p-6 mb-8">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-xl font-bold text-white">🎛️ სვეტების ფილტრი</h2>
+                    <div class="flex gap-2">
+                        <button onclick="selectAllColumns()" class="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-sm">✅ ყველა</button>
+                        <button onclick="deselectAllColumns()" class="px-3 py-1 bg-red-600 hover:bg-red-500 text-white rounded text-sm">❌ არცერთი</button>
+                        <button onclick="selectMainColumns()" class="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded text-sm">⭐ მთავარი</button>
+                    </div>
+                </div>
+                <div class="column-filter grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-2" id="columnFilter">
+                    <div class="text-gray-500">ჯერ არ არის მონაცემები</div>
                 </div>
             </div>
 
             <!-- მონაცემთა ცხრილი -->
             <div class="glass rounded-xl p-6 mb-8">
                 <div class="flex justify-between items-center mb-4">
-                    <h2 class="text-xl font-bold text-white">📊 მონაცემთა ცხრილი</h2>
-                    <span class="px-3 py-1 bg-gray-800 rounded text-sm text-gray-400" id="tableInfo">0 მატჩი</span>
+                    <h2 class="text-xl font-bold text-white">📊 მონაცემთა ცხრილი (<span id="matchCount">0</span> მატჩი)</h2>
+                    <div class="text-sm text-gray-400">
+                        💡 გადაახვიე ჰორიზონტალურად ყველა სვეტის სანახავად
+                    </div>
                 </div>
-                <div class="table-container border border-gray-700 rounded-lg">
-                    <table class="w-full text-left">
-                        <thead class="text-xs text-gray-400 uppercase bg-[#0F172A]">
+                <div class="table-scroll border border-gray-700 rounded-lg">
+                    <table class="data-table w-full">
+                        <thead>
                             <tr id="tableHeader">
-                                <th class="px-2 py-2">იტვირთება...</th>
+                                <th class="px-3 py-2">იტვირთება...</th>
                             </tr>
                         </thead>
                         <tbody id="tableBody">
                             <tr>
-                                <td class="px-2 py-4 text-center text-gray-500">ჩასვი CSV და დააჭირე "იმპორტი"-ს</td>
+                                <td class="px-3 py-4 text-center text-gray-500">ჩასვი CSV და დააჭირე "იმპორტი"-ს</td>
                             </tr>
                         </tbody>
                     </table>
@@ -271,13 +269,17 @@ async def get_dashboard():
                     <h3 class="text-lg font-bold text-white">📜 ლაივ ლოგები</h3>
                     <button onclick="clearLogs()" class="text-xs text-gray-400 hover:text-white">გასუფთავება</button>
                 </div>
-                <div id="terminal" class="bg-[#020617] border border-gray-800 rounded-lg p-4 h-64 overflow-y-auto font-mono text-xs space-y-1">
+                <div id="terminal" class="bg-[#020617] border border-gray-800 rounded-lg p-4 h-48 overflow-y-auto font-mono text-xs space-y-1">
                     <div class="text-gray-500">// სისტემა მზად არის...</div>
                 </div>
             </div>
         </div>
 
         <script>
+            let allMatchesData = [];
+            let allHeaders = [];
+            let visibleColumns = [];
+
             async function importCSV() {
                 const csv = document.getElementById('csvInput').value;
                 const btn = document.getElementById('importBtn');
@@ -288,7 +290,7 @@ async def get_dashboard():
                 }
                 
                 btn.disabled = true;
-                btn.textContent = '⏳ იმპორტი მიმდინარეობს...';
+                btn.textContent = '⏳ მუშაობს...';
                 addLog('📥 იმპორტი იწყება...', 'info');
                 
                 try {
@@ -303,10 +305,11 @@ async def get_dashboard():
                     if (result.success) {
                         addLog(`✅ ${result.message}`, 'success');
                         addLog(`📊 სვეტები: ${result.columns_count}`, 'info');
+                        addLog(`⚽ სულ გოლი: ${result.total_goals}`, 'info');
                         
                         document.getElementById('stat-matches').textContent = result.matches_count;
-                        document.getElementById('stat-goals').textContent = result.total_goals;
                         document.getElementById('stat-columns').textContent = result.columns_count;
+                        document.getElementById('stat-goals').textContent = result.total_goals;
                         
                         await loadMatches();
                     } else {
@@ -328,53 +331,120 @@ async def get_dashboard():
                     const result = await response.json();
                     
                     if (result.success && result.data.length > 0) {
-                        addLog(`✅ ჩაიტვირთა ${result.count} მატჩი`, 'success');
-                        renderTable(result.data, result.headers);
-                    } else {
-                        addLog('⚠️ მონაცემები არ არის', 'warning');
+                        allMatchesData = result.data;
+                        allHeaders = result.headers;
+                        visibleColumns = [...allHeaders]; // ყველა სვეტი ჩვენებულია
+                        
+                        document.getElementById('matchCount').textContent = result.count;
+                        document.getElementById('stat-visible').textContent = visibleColumns.length;
+                        
+                        renderColumnFilter();
+                        renderTable();
+                        addLog(`✅ ჩაიტვირთა ${result.count} მატჩი, ${allHeaders.length} სვეტი`, 'success');
                     }
                 } catch (error) {
                     addLog(`❌ ${error.message}`, 'error');
                 }
             }
 
-            function renderTable(matches, headers) {
+            function renderColumnFilter() {
+                const filter = document.getElementById('columnFilter');
+                filter.innerHTML = allHeaders.map(col => `
+                    <label class="column-checkbox">
+                        <input type="checkbox" checked onchange="toggleColumn('${col}')" class="mr-2">
+                        <span class="text-xs text-gray-300">${col}</span>
+                    </label>
+                `).join('');
+            }
+
+            function toggleColumn(col) {
+                if (visibleColumns.includes(col)) {
+                    visibleColumns = visibleColumns.filter(c => c !== col);
+                } else {
+                    visibleColumns.push(col);
+                }
+                document.getElementById('stat-visible').textContent = visibleColumns.length;
+                renderTable();
+            }
+
+            function selectAllColumns() {
+                visibleColumns = [...allHeaders];
+                document.getElementById('stat-visible').textContent = visibleColumns.length;
+                renderColumnFilter();
+                renderTable();
+            }
+
+            function deselectAllColumns() {
+                visibleColumns = [];
+                document.getElementById('stat-visible').textContent = 0;
+                renderColumnFilter();
+                renderTable();
+            }
+
+            function selectMainColumns() {
+                const mainCols = ['Date', 'Time', 'HomeTeam', 'AwayTeam', 'FTHG', 'FTAG', 'FTR', 'HTHG', 'HTAG', 'HTR', 
+                                  'Referee', 'HS', 'AS', 'HST', 'AST', 'HF', 'AF', 'HC', 'AC', 'HY', 'AY', 'HR', 'AR'];
+                visibleColumns = allHeaders.filter(h => mainCols.includes(h));
+                document.getElementById('stat-visible').textContent = visibleColumns.length;
+                renderColumnFilter();
+                renderTable();
+            }
+
+            function renderTable() {
                 const header = document.getElementById('tableHeader');
                 const tbody = document.getElementById('tableBody');
                 
-                // ვირჩევთ ძირითად სვეტებს
-                const mainHeaders = ['Date', 'HomeTeam', 'FTHG', 'FTAG', 'FTR', 'HTHG', 'HTAG', 'Referee', 'HS', 'AS', 'HC', 'AC', 'HY', 'AY', 'HR', 'AR'];
+                if (visibleColumns.length === 0) {
+                    header.innerHTML = '<th class="px-3 py-2">აირჩიე სვეტები ფილტრიდან</th>';
+                    tbody.innerHTML = '<tr><td class="px-3 py-4 text-center text-gray-500">სვეტები არ არის არჩეული</td></tr>';
+                    return;
+                }
                 
                 // სათაური
-                header.innerHTML = '<tr>' + mainHeaders.map(h => 
-                    `<th class="px-2 py-2">${h}</th>`
+                header.innerHTML = '<tr>' + visibleColumns.map(col => 
+                    `<th class="px-3 py-2">${col}</th>`
                 ).join('') + '</tr>';
                 
-                // სხეული
-                tbody.innerHTML = matches.map(m => {
-                    const resultColor = m.FTR === 'H' ? 'text-emerald-400' : m.FTR === 'A' ? 'text-red-400' : 'text-yellow-400';
-                    const resultText = m.FTR === 'H' ? 'მასპ' : m.FTR === 'A' ? 'სტუმ' : 'ფრე';
-                    
-                    return `
-                        <tr class="border-b border-gray-800 hover:bg-[#1E293B]">
-                            <td class="px-2 py-2">${m.Date || '-'}</td>
-                            <td class="px-2 py-2 font-semibold text-white">${m.HomeTeam || '-'}</td>
-                            <td class="px-2 py-2 text-center font-bold text-lg">${m.FTHG || 0}</td>
-                            <td class="px-2 py-2 text-center font-bold text-lg">${m.FTAG || 0}</td>
-                            <td class="px-2 py-2 text-center font-bold ${resultColor}">${resultText}</td>
-                            <td class="px-2 py-2 text-center text-gray-400">${m.HTHG || 0}</td>
-                            <td class="px-2 py-2 text-center text-gray-400">${m.HTAG || 0}</td>
-                            <td class="px-2 py-2 text-gray-400 text-xs">${m.Referee || '-'}</td>
-                            <td class="px-2 py-2 text-center">${m.HS || 0}/${m.AS || 0}</td>
-                            <td class="px-2 py-2 text-center">${m.HC || 0}/${m.AC || 0}</td>
-                            <td class="px-2 py-2 text-center">${m.HY || 0}/${m.AY || 0}</td>
-                            <td class="px-2 py-2 text-center">${m.HR || 0}/${m.AR || 0}</td>
-                        </tr>
-                    `;
+                // სხეული - ყველა მატჩი
+                tbody.innerHTML = allMatchesData.map(m => {
+                    return '<tr>' + visibleColumns.map(col => {
+                        let value = m[col];
+                        if (value === null || value === undefined || value === '') {
+                            value = '-';
+                        }
+                        // FTR სვეტისთვის ფერადი
+                        let cls = '';
+                        if (col === 'FTR') {
+                            if (value === 'H') cls = 'text-emerald-400 font-bold';
+                            else if (value === 'A') cls = 'text-red-400 font-bold';
+                            else if (value === 'D') cls = 'text-yellow-400 font-bold';
+                        }
+                        return `<td class="px-3 py-2 ${cls}">${value}</td>`;
+                    }).join('') + '</tr>';
                 }).join('');
+            }
+
+            function exportJSON() {
+                if (allMatchesData.length === 0) {
+                    alert('ჯერ იმპორტირე მონაცემები');
+                    return;
+                }
                 
-                document.getElementById('tableInfo').textContent = `${matches.length} მატჩი × ${headers.length} სვეტი`;
-                addLog(`📋 ცხრილი აგებულია`, 'success');
+                const data = {
+                    headers: allHeaders,
+                    matches: allMatchesData,
+                    exported_at: new Date().toISOString()
+                };
+                
+                const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `footstats_all_${new Date().toISOString().split('T')[0]}.json`;
+                a.click();
+                URL.revokeObjectURL(url);
+                
+                addLog('💾 JSON ექსპორტი წარმატებულია', 'success');
             }
 
             function addLog(message, type = 'info') {
@@ -382,13 +452,7 @@ async def get_dashboard():
                 const log = document.createElement('div');
                 log.className = 'log-entry';
                 
-                const colors = { 
-                    'info': 'text-blue-400', 
-                    'success': 'text-emerald-400', 
-                    'warning': 'text-yellow-400', 
-                    'error': 'text-red-400' 
-                };
-                
+                const colors = { 'info': 'text-blue-400', 'success': 'text-emerald-400', 'warning': 'text-yellow-400', 'error': 'text-red-400' };
                 const timestamp = new Date().toLocaleTimeString('ka-GE');
                 log.innerHTML = `<span class="text-gray-600">[${timestamp}]</span> <span class="${colors[type]}">${message}</span>`;
                 terminal.appendChild(log);
